@@ -9,7 +9,9 @@ set(ADAPTER_SRCS
     AdapterLog.cpp
     ConfigDB.cpp
     FrameCodec.cpp
+    HttpIngest.cpp
     IngestServer.cpp
+    ModbusPoller.cpp
     ParserWorker.cpp
     EtherDBWriter.cpp
     PublishQueue.cpp
@@ -25,7 +27,9 @@ set(ADAPTER_HEADERS
     DeviceModel.h
     Pipeline.h
     FrameCodec.h
+    HttpIngest.h
     IngestServer.h
+    ModbusPoller.h
     ParserWorker.h
     EtherDBWriter.h
     PublishQueue.h

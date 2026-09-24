@@ -1,20 +1,25 @@
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // ============================================================================
-// etherAdapter — planned ingest channels (see IngestStubs.h)
+// etherAdapter — planned ingest channel: MQTT (see IngestStubs.h)
 // ============================================================================
 #include "IngestStubs.h"
 
 #include "AdapterLog.h"
 
 namespace EtherAdapter {
-
-HttpIngest::HttpIngest(const AdapterConfig& cfg) : _cfg(cfg) {}
-
-bool HttpIngest::start(std::string*) {
-    EA_LOG_INFO << "HTTP ingest: stub (conn_proto=http(3) devices are not served yet)";
-    return true;
-}
-
-void HttpIngest::stop() {}
 
 MqttIngest::MqttIngest(const AdapterConfig& cfg) : _cfg(cfg) {}
 
@@ -24,14 +29,5 @@ bool MqttIngest::start(std::string*) {
 }
 
 void MqttIngest::stop() {}
-
-ModbusIngest::ModbusIngest(const AdapterConfig& cfg) : _cfg(cfg) {}
-
-bool ModbusIngest::start(std::string*) {
-    EA_LOG_INFO << "MODBUS ingest: stub (conn_proto=modbus(2) devices are not served yet)";
-    return true;
-}
-
-void ModbusIngest::stop() {}
 
 } // namespace EtherAdapter

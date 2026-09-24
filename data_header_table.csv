@@ -1,5 +1,5 @@
-data_proto_id,frame_type,frame_len,start_flag,end_flag,endian,reserve
-100077,0,73,0x01,0x03,0,
-关联测点,帧类型（状态，事件）,一帧长度,自定义，比如突然出现脉冲式事件采集,脉冲式采集结束,,
-int,1byte,2byte,1byte,,,
-,,,,,,4byte
+data_proto_id,frame_type,frame_len,start_flag,end_flag,endian,slave_addr,fun_code,start_addr,addr_num
+100077,0,73,0x01,0x03,0,,,,
+关联测点,帧类型（状态，事件）,一帧长度,自定义，比如突然出现脉冲式事件采集,脉冲式采集结束,,,,,
+int,1byte,2byte,1byte,,,modbus 从站地址,功能码,寄存器开始地址,个数
+,,,,,,2,0x03,4001,10

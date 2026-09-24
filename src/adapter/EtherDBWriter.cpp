@@ -1,3 +1,17 @@
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // ============================================================================
 // etherAdapter — EtherDB writer thread (see EtherDBWriter.h)
 // ============================================================================
@@ -50,21 +64,31 @@ bool EtherDBWriter::start(std::string* err) {
     if (!ensureDatabase(err)) return false;
 
     int prepared = 0;
+    int sqlDevices = 0;
     for (const DeviceDesc& dev : _db.devices()) {
-        if (dev.connProto != CONN_RAW_DATA || dev.spec.fields.empty()) continue;
+        if (dev.spec.fields.empty()) continue;
+        if (dev.connProto != CONN_RAW_DATA && dev.connProto != CONN_MODBUS &&
+            dev.connProto != CONN_HTTP) {
+            continue;   // mqtt etc. — not served yet
+        }
         if (_cfg.createTables && !ensureTable(dev, err)) return false;
+
+        if (dev.connProto == CONN_HTTP) {
+            ++sqlDevices;   // slow path: plain INSERT SQL, no prepared sink
+            continue;
+        }
         if (!prepareSink(dev, err)) return false;
         ++prepared;
     }
-    if (prepared == 0) {
-        EA_LOG_WARN << "no raw_data device with a usable field layout — "
-                 << "the writer has nothing to insert";
+    if (prepared == 0 && sqlDevices == 0) {
+        EA_LOG_WARN << "no device with a usable field layout — "
+                    << "the writer has nothing to insert";
     }
 
     _running.store(true);
     _thread = std::thread(&EtherDBWriter::run, this);
-    EA_LOG_INFO << "EtherDB writer started (" << prepared << " device sink(s), db "
-             << _dbName << ")";
+    EA_LOG_INFO << "EtherDB writer started (" << prepared << " columnar sink(s), "
+                << sqlDevices << " SQL sink(s), db " << _dbName << ")";
     return true;
 }
 
@@ -211,6 +235,15 @@ void EtherDBWriter::run() {
 }
 
 void EtherDBWriter::writeBatch(const RowBatch& batch) {
+    if (!batch.dev) return;
+
+    // HTTP devices carry slow data and are written through plain INSERT SQL
+    // (no prepared-statement binding).
+    if (batch.dev->connProto == CONN_HTTP) {
+        writeBatchSql(batch);
+        return;
+    }
+
     auto it = _sinks.find(batch.dev);
     if (it == _sinks.end() || !it->second || !it->second->stmt) return;
     Sink& sink = *it->second;
@@ -308,6 +341,66 @@ void EtherDBWriter::writeBatch(const RowBatch& batch) {
                 EA_LOG_WARN << "INSERT " << dev.deviceId << ": " << errs
                          << " of " << n << " row(s) rejected (affected " << affected << ")";
             }
+        }
+        done += n;
+    }
+}
+
+// ============================================================================
+// HTTP sink: one INSERT SQL statement per batch (200 rows max per statement).
+// NULL cells are written as SQL NULL; doubles use %.10g formatting.
+// ============================================================================
+namespace {
+std::string formatDouble(double v) {
+    std::ostringstream os;
+    os.precision(10);
+    os << v;
+    return os.str();
+}
+} // namespace
+
+void EtherDBWriter::writeBatchSql(const RowBatch& batch) {
+    const DeviceDesc& dev = *batch.dev;
+    const int fields = dev.fieldCount();
+    const int rows   = batch.rowCount();
+    if (fields == 0 || rows == 0) return;
+
+    static const int kMaxRowsPerStmt = 200;
+
+    int done = 0;
+    while (done < rows) {
+        const int n = std::min(rows - done, kMaxRowsPerStmt);
+
+        std::string sql;
+        sql.reserve(128 + (size_t)n * (16 + (size_t)fields * 8));
+        sql += "INSERT INTO ";
+        sql += dev.deviceId;
+        sql += " VALUES ";
+        for (int r = 0; r < n; ++r) {
+            if (r) sql += ',';
+            sql += '(';
+            sql += std::to_string(batch.ts[(size_t)(done + r)]);
+            const Cell* rowCells = batch.cells.data() + (size_t)(done + r) * (size_t)fields;
+            for (int k = 0; k < fields; ++k) {
+                sql += ',';
+                const Cell& c = rowCells[k];
+                if (c.isNull) { sql += "NULL"; continue; }
+                const FieldDesc& f = dev.spec.fields[k];
+                if (f.asDouble)                    sql += formatDouble(c.v.d);
+                else if (f.kind == FieldKind::Bool) sql += (c.v.i ? '1' : '0');
+                else                               sql += std::to_string(c.v.i);
+            }
+            sql += ')';
+        }
+
+        EtDBResult r = _client->query(sql);
+        if (!r.error().empty()) {
+            EA_LOG_ERROR << "http insert failed for " << dev.deviceId << " (" << n
+                         << " row(s)): " << r.error();
+            _stats->writeErrors.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            _stats->rowsWritten.fetch_add((uint64_t)n, std::memory_order_relaxed);
+            _stats->batchesWritten.fetch_add(1, std::memory_order_relaxed);
         }
         done += n;
     }

@@ -1,9 +1,22 @@
-// ============================================================================
-// etherAdapter — planned ingest channels (HTTP / MQTT / MODBUS) — stubs
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
 //
-// Design: "2. http 接入 暂时 stub / 3. mttq 订阅接入 暂时 stub".
-// These classes exist so the startup sequence, configuration story and logs
-// make the planned channels visible; no data path is implemented yet.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ============================================================================
+// etherAdapter — planned ingest channel: MQTT subscribe — stub
+//
+// Design: "3. mttq 订阅接入 暂时 stub".
+// (HTTP ingest lives in HttpIngest.*; MODBUS polling in ModbusPoller.*.)
 // ============================================================================
 #ifndef ETHERADAPTER_INGESTSTUBS_H
 #define ETHERADAPTER_INGESTSTUBS_H
@@ -14,35 +27,11 @@
 
 namespace EtherAdapter {
 
-// HTTP push ingest (device_table.conn_proto = "http(3)").
-// Planned: an HTTP endpoint bound to the device's local_server_port which
-// turns request bodies into RawChunks on the ingest queue.
-class HttpIngest {
-public:
-    explicit HttpIngest(const AdapterConfig& cfg);
-    bool start(std::string* err);   // stub: always succeeds
-    void stop();
-private:
-    const AdapterConfig& _cfg;
-};
-
 // MQTT subscribe ingest (device_table.conn_proto = "mttq(4)" / mqtt).
 // Planned: subscribe to per-device topics on the broker, feed the ingest queue.
 class MqttIngest {
 public:
     explicit MqttIngest(const AdapterConfig& cfg);
-    bool start(std::string* err);   // stub: always succeeds
-    void stop();
-private:
-    const AdapterConfig& _cfg;
-};
-
-// MODBUS ingest (device_table.conn_proto = "modbus(2)").
-// Planned: a master that polls the devices in device_table with a schedule
-// derived from data_proto_table, then feeds the ingest queue.
-class ModbusIngest {
-public:
-    explicit ModbusIngest(const AdapterConfig& cfg);
     bool start(std::string* err);   // stub: always succeeds
     void stop();
 private:

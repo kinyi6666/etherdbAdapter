@@ -1,3 +1,17 @@
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // ============================================================================
 // etherAdapter — application assembly (see AdapterApp.h)
 // ============================================================================
@@ -141,6 +155,9 @@ void AdapterApp::logConfigSummary() const {
              << " batchRows=" << _cfg.etherdb.batchRows
              << " flush=" << _cfg.etherdb.flushIntervalMs << "ms";
     EA_LOG_INFO << "  parse     : frameLenMode=" << _cfg.parse.frameLenMode;
+    EA_LOG_INFO << "  http      : port=" << (_cfg.http.port ? std::to_string(_cfg.http.port)
+                                                          : std::string("(from device_table)"));
+    EA_LOG_INFO << "  modbus    : poll every " << _cfg.modbus.pollIntervalMs << " ms";
     EA_LOG_INFO << "  zmq       : " << (_cfg.zmq.enabled ? "enabled (stub)" : "disabled")
              << " endpoint=" << _cfg.zmq.pubEndpoint;
     EA_LOG_INFO << "  log       : " << _cfg.resolvePath(_cfg.log.dir)
@@ -148,7 +165,7 @@ void AdapterApp::logConfigSummary() const {
 }
 
 void AdapterApp::statsLoop() {
-    uint64_t pc = 0, pb = 0, pf = 0, pr = 0, pw = 0, pwe = 0;
+    uint64_t pc = 0, pb = 0, pf = 0, pr = 0, pw = 0, pwe = 0, pmb = 0, pht = 0;
 
     while (_statsRunning.load(std::memory_order_relaxed)) {
         for (int i = 0; i < 50 && _statsRunning.load(std::memory_order_relaxed); ++i)
@@ -162,14 +179,17 @@ void AdapterApp::statsLoop() {
         const uint64_t w  = _stats->rowsWritten.load(std::memory_order_relaxed);
         const uint64_t we = _stats->writeErrors.load(std::memory_order_relaxed);
         const uint64_t un = _stats->unmatched.load(std::memory_order_relaxed);
+        const uint64_t mb = _stats->modbusRequests.load(std::memory_order_relaxed);
+        const uint64_t ht = _stats->httpRequests.load(std::memory_order_relaxed);
 
         EA_LOG_INFO << "[stats] chunks +" << (c - pc)
                  << " (" << (b - pb) / 1024 << " KB) frames +" << (f - pf)
                  << " rows +" << (r - pr) << " written +" << (w - pw)
+                 << " modbus +" << (mb - pmb) << " http +" << (ht - pht)
                  << " drop " << un << " err " << we
                  << " | queue ingest " << _ingestQueue->size_approx()
                  << " write " << _writeQueue->size_approx();
-        pc = c; pb = b; pf = f; pr = r; pw = w; pwe = we;
+        pc = c; pb = b; pf = f; pr = r; pw = w; pwe = we; pmb = mb; pht = ht;
     }
     (void)pwe;
 }
@@ -223,23 +243,33 @@ int AdapterApp::run(const std::string& cfgFile) {
                                    _stats.get()));
     _parser->start();
 
-    // ── 6. planned ingest channels (stubs) ──
-    _http.reset(new HttpIngest(_cfg));
-    _mqtt.reset(new MqttIngest(_cfg));
-    _modbus.reset(new ModbusIngest(_cfg));
-    _http->start(&err);
-    _mqtt->start(&err);
-    _modbus->start(&err);
+    // ── 6. modbus polling (register-read requests) + mqtt stub ──
+    _modbusPoller.reset(new ModbusPoller(_cfg, *_configDb, _stats.get()));
+    _modbusPoller->start();
 
-    // ── 7. ingest servers (muduo) ──
+    _mqtt.reset(new MqttIngest(_cfg));
+    _mqtt->start(&err);
+
+    // ── 7. listeners: unified TCP ingest (raw_data/modbus) + ONE http server ──
     _server.reset(new IngestServer(&_loop, *_configDb, _cfg.server,
                                    _ingestQueue.get(), _stats.get()));
     if (!_server->start(&err)) {
         EA_LOG_FATAL << err;
+        _modbusPoller->stop();
         _parser->stop();
         _publish->stop();
         _writer->stop();
         return 4;
+    }
+    _http.reset(new HttpIngest(&_loop, *_configDb, _cfg, _writeQueue.get(), _stats.get()));
+    if (!_http->start(&err)) {
+        EA_LOG_FATAL << err;
+        _server->stop();
+        _modbusPoller->stop();
+        _parser->stop();
+        _publish->stop();
+        _writer->stop();
+        return 5;
     }
 
     // ── 8. run ──
@@ -255,18 +285,20 @@ int AdapterApp::run(const std::string& cfgFile) {
     _statsRunning.store(false);
     if (_statsThread.joinable()) _statsThread.join();
 
-    _server->stop();     // stop accepting new data
-    _parser->stop();     // parse queued data, flush partial batches
+    _server->stop();        // stop accepting new data
+    _http->stop();          // stop the HTTP server
+    _modbusPoller->stop();  // stop register polling
+    _parser->stop();        // parse queued data, flush partial batches
     _publish->stop();
-    _writer->stop();     // drain write queue, close EtherDB connection
-    _http->stop();
+    _writer->stop();        // drain write queue, close EtherDB connection
     _mqtt->stop();
-    _modbus->stop();
 
     EA_LOG_INFO << "etherAdapter stopped: "
              << _stats->frames.load() << " frame(s), "
              << _stats->rowsParsed.load() << " row(s) parsed, "
              << _stats->rowsWritten.load() << " row(s) written, "
+             << _stats->modbusRequests.load() << " modbus request(s), "
+             << _stats->httpRequests.load() << " http request(s), "
              << _stats->writeErrors.load() << " write error(s)";
     return 0;
 }

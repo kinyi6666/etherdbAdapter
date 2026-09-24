@@ -1,3 +1,17 @@
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // ============================================================================
 // etherAdapter — pipeline data types and lock-free queues
 //
@@ -35,6 +49,14 @@ struct AdapterStats {
     std::atomic<uint64_t> batchesWritten{0};
     std::atomic<uint64_t> writeErrors{0};   // failed batch/submit errors
     std::atomic<uint64_t> publishStub{0};   // rows seen by the publish stub
+
+    // ── modbus ──
+    std::atomic<uint64_t> modbusRequests{0};   // register-read requests sent
+
+    // ── http ──
+    std::atomic<uint64_t> httpRequests{0};     // POST requests accepted
+    std::atomic<uint64_t> httpRows{0};         // rows handed to the write queue
+    std::atomic<uint64_t> httpErrors{0};       // rejected requests
 };
 
 // Queue traits mirroring the EtherDB server side (DServerQueue.h).

@@ -18,3 +18,13 @@
 
 2. http的接入 暂时stub
 3. mttq 订阅接入 暂时stub
+
+
+   if (0xFF == session.transactionId ) {session.transactionId = 1;}
+    msg.AppendInt16(session.transactionId++);
+    msg.AppendInt16(0x0000);
+    msg.AppendInt16(6);                             //目前长度只有6, 先写死
+    msg.AppendInt8 (session.query_proto->unit);
+    msg.AppendInt8 (session.query_proto->funCode);
+    msg.AppendInt16(session.query_proto->data);
+    msg.AppendInt16(session.query_proto->readCount);

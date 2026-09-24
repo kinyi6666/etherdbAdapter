@@ -1,3 +1,17 @@
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // ============================================================================
 // etherAdapter — configuration loading (see AdapterConfig.h)
 // ============================================================================
@@ -106,6 +120,15 @@ AdapterConfig AdapterConfig::load(const std::string& cfgFile) {
 
     // [parse]
     cfg.parse.frameLenMode = ini.get("parse", "frameLenMode", cfg.parse.frameLenMode);
+
+    // [http]
+    cfg.http.port = (uint16_t)ini.getInt("http", "port", cfg.http.port);
+
+    // [modbus]
+    cfg.modbus.pollIntervalMs = ini.getInt("modbus", "pollIntervalMs", cfg.modbus.pollIntervalMs);
+    cfg.modbus.connectTimeoutMs = ini.getInt("modbus", "connectTimeoutMs", cfg.modbus.connectTimeoutMs);
+    if (cfg.modbus.pollIntervalMs < 50) cfg.modbus.pollIntervalMs = 50;
+    if (cfg.modbus.connectTimeoutMs < 100) cfg.modbus.connectTimeoutMs = 100;
 
     // [log]
     cfg.log.dir   = ini.get("log", "dir", cfg.log.dir);

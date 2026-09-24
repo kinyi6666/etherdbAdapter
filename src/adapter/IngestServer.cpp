@@ -1,3 +1,17 @@
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // ============================================================================
 // etherAdapter — device data ingest (see IngestServer.h)
 // ============================================================================
@@ -110,22 +124,24 @@ void IngestServer::onMessage(const TcpConnectionPtr& conn, Buffer* buf, Timestam
         if (dev) _devByConn[conn.get()] = dev;
     }
 
-    const bool ingestable = dev && dev->connProto == CONN_RAW_DATA &&
-                            !dev->spec.fields.empty();
+const bool ingestable = dev &&
+        (dev->connProto == CONN_RAW_DATA || dev->connProto == CONN_MODBUS) &&
+        !dev->spec.fields.empty();
     if (!ingestable) {
         const uint64_t n = _stats->unmatched.fetch_add(1, std::memory_order_relaxed) + 1;
         if (n == 1 || n % 1000 == 0) {
             if (!dev) {
                 EA_LOG_WARN << "dropping " << len << " byte(s) from unknown peer "
-                         << conn->peerAddress().toIpPort() << " (unmatched chunks: " << n << ")";
-            } else if (dev->connProto != CONN_RAW_DATA) {
+                            << conn->peerAddress().toIpPort() << " (unmatched chunks: " << n << ")";
+            } else if (dev->connProto == CONN_HTTP || dev->connProto == CONN_MQTT) {
                 EA_LOG_WARN << "dropping " << len << " byte(s) from " << dev->deviceId
-                         << ": conn_proto " << dev->connProto
-                         << " is not implemented yet (unmatched chunks: " << n << ")";
+                            << ": conn_proto " << dev->connProto
+                            << " data is served by its own channel (http/mqtt), not this port "
+                            << "(unmatched chunks: " << n << ")";
             } else {
                 EA_LOG_WARN << "dropping " << len << " byte(s) from " << dev->deviceId
-                         << ": no field layout for data_proto_id " << dev->dataProtoId
-                         << " (unmatched chunks: " << n << ")";
+                            << ": no field layout for data_proto_id " << dev->dataProtoId
+                            << " (unmatched chunks: " << n << ")";
             }
         }
         buf->retrieveAll();

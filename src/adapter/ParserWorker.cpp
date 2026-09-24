@@ -1,3 +1,17 @@
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // ============================================================================
 // etherAdapter — parser thread (see ParserWorker.h)
 // ============================================================================
@@ -58,8 +72,11 @@ void ParserWorker::run() {
                 batch.reserveRows(_batchRows);
             }
 
-            const int rows = FrameCodec::feed(*chunk.dev, st, chunk.data.data(),
-                                              chunk.data.size(), chunk.recvMs, batch);
+            const int rows = (chunk.dev->connProto == CONN_MODBUS)
+                ? FrameCodec::feedModbus(*chunk.dev, st, chunk.data.data(),
+                                         chunk.data.size(), chunk.recvMs, batch)
+                : FrameCodec::feed(*chunk.dev, st, chunk.data.data(),
+                                   chunk.data.size(), chunk.recvMs, batch);
             if (rows > 0) {
                 _stats->frames.fetch_add((uint64_t)rows, std::memory_order_relaxed);
                 _stats->rowsParsed.fetch_add((uint64_t)rows, std::memory_order_relaxed);

@@ -1,3 +1,17 @@
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // ============================================================================
 // etherAdapter — SQLite configuration database reader (see ConfigDB.h)
 // ============================================================================
@@ -288,13 +302,27 @@ bool ConfigDB::loadAll(std::string* err) {
 }
 
 bool ConfigDB::loadHeaders(std::string* err) {
-    const char* sql =
+    // Newer schema carries the modbus request columns (unit / fun_code / data /
+    // read_count); fall back to the old column set when the database predates
+    // them (modbus polling will be disabled then).
+    const char* sqlNew =
+        "SELECT data_proto_id, frame_type, frame_len, start_flag, end_flag, endian, "
+        "       unit, fun_code, data, read_count "
+        "FROM data_header_table";
+    const char* sqlOld =
         "SELECT data_proto_id, frame_type, frame_len, start_flag, end_flag, endian "
         "FROM data_header_table";
+
     sqlite3_stmt* st = nullptr;
-    if (sqlite3_prepare_v2(_db, sql, -1, &st, nullptr) != SQLITE_OK) {
-        if (err) *err = std::string("data_header_table: ") + sqlite3_errmsg(_db);
-        return false;
+    bool withModbus = (sqlite3_prepare_v2(_db, sqlNew, -1, &st, nullptr) == SQLITE_OK);
+    if (!withModbus) {
+        if (sqlite3_prepare_v2(_db, sqlOld, -1, &st, nullptr) != SQLITE_OK) {
+            if (err) *err = std::string("data_header_table: ") + sqlite3_errmsg(_db);
+            return false;
+        }
+        EA_LOG_WARN << "data_header_table has no modbus request columns "
+                    << "(unit/fun_code/data/read_count); modbus polling disabled — "
+                    << "re-import the configuration to upgrade the schema";
     }
 
     int n = 0;
@@ -309,6 +337,12 @@ bool ConfigDB::loadHeaders(std::string* err) {
         s.startFlag   = (uint8_t)readUInt32(st, 3, 0);
         s.endFlag     = (uint8_t)readUInt32(st, 4, 0);
         s.endian      = (int)readInt64(st, 5, 0);
+        if (withModbus) {
+            s.unit      = (int)readInt64(st, 6, 0);
+            s.funCode   = (int)readInt64(st, 7, 0);
+            s.dataAddr  = (int)readInt64(st, 8, -1);
+            s.readCount = (int)readInt64(st, 9, 0);
+        }
         _specs[pid]   = std::move(s);
         ++n;
     }
@@ -446,12 +480,21 @@ void ConfigDB::rebuildIndexes() {
     _byIpPort.clear();
     _byIpUnique.clear();
     _listenPorts.clear();
+    _httpListenPorts.clear();
+    _httpByPort.clear();
 
     // Count devices per ip first (to know which ips map to exactly one device).
     std::unordered_map<std::string, int> ipCount;
     for (const DeviceDesc& d : _devices) {
         ++ipCount[d.ip];
-        if (d.localServerPort != 0) _listenPorts.push_back(d.localServerPort);
+        if (d.localServerPort == 0) continue;
+        if (d.connProto == CONN_HTTP) {
+            _httpListenPorts.push_back(d.localServerPort);
+            _httpByPort.emplace(d.localServerPort, &d);   // first http device wins
+        } else if (d.connProto == CONN_RAW_DATA || d.connProto == CONN_MODBUS) {
+            _listenPorts.push_back(d.localServerPort);
+        }
+        // other protocols (mqtt, ...) are not served yet
     }
 
     for (size_t i = 0; i < _devices.size(); ++i) {
@@ -474,6 +517,9 @@ void ConfigDB::rebuildIndexes() {
     std::sort(_listenPorts.begin(), _listenPorts.end());
     _listenPorts.erase(std::unique(_listenPorts.begin(), _listenPorts.end()),
                        _listenPorts.end());
+    std::sort(_httpListenPorts.begin(), _httpListenPorts.end());
+    _httpListenPorts.erase(std::unique(_httpListenPorts.begin(), _httpListenPorts.end()),
+                           _httpListenPorts.end());
 }
 
 const DeviceDesc* ConfigDB::matchDevice(const std::string& ip, uint16_t peerPort) const {
@@ -484,6 +530,15 @@ const DeviceDesc* ConfigDB::matchDevice(const std::string& ip, uint16_t peerPort
     if (it2 != _byIpUnique.end()) return &_devices[it2->second];
 
     return nullptr;
+}
+
+const DeviceDesc* ConfigDB::matchHttpDevice(const std::string& ip, uint16_t peerPort,
+                                            uint16_t httpPort) const {
+    if (const DeviceDesc* d = matchDevice(ip, peerPort)) {
+        if (d->connProto == CONN_HTTP) return d;
+    }
+    auto it = _httpByPort.find(httpPort);
+    return (it == _httpByPort.end()) ? nullptr : it->second;
 }
 
 } // namespace EtherAdapter

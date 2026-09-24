@@ -9,6 +9,15 @@ else()
     target_link_libraries(device_sim pthread)
 endif()
 
+# modbus_sim — modbus device simulator (register requests + response push)
+add_executable(modbus_sim modbus_sim.cpp)
+
+if(WIN32)
+    target_link_libraries(modbus_sim Ws2_32)
+else()
+    target_link_libraries(modbus_sim pthread)
+endif()
+
 # query_check — tiny query tool built against the EtherDB client SDK
 add_executable(query_check query_check.cpp)
 target_include_directories(query_check PRIVATE ${ETHERDB_SDK_DIR}/include)

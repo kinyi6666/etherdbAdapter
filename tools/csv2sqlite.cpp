@@ -1,3 +1,17 @@
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // ============================================================================
 // csv2sqlite — import the etherAdapter configuration CSVs into a SQLite
 // configuration database (device_table / data_header_table / data_proto_table).
@@ -35,7 +49,7 @@ static const char* kSchema =
     "  device_id         TEXT,"
     "  device_name       TEXT,"
     "  device_ip         TEXT NOT NULL,"
-    "  device_port       INTEGER NOT NULL,"
+    "  device_port       INTEGER,"          // device source/request port (empty for http)
     "  conn_proto        TEXT,"
     "  local_server_port INTEGER NOT NULL,"
     "  data_proto_id     INTEGER NOT NULL,"
@@ -49,7 +63,11 @@ static const char* kSchema =
     "  start_flag    TEXT,"          // may be '0x01'
     "  end_flag      TEXT,"
     "  endian        INTEGER DEFAULT 0,"
-    "  reserve       TEXT"
+    "  reserve       TEXT,"
+    "  unit          INTEGER,"        // modbus register-read request
+    "  fun_code      INTEGER,"
+    "  data          INTEGER,"
+    "  read_count    INTEGER"
     ");"
     "CREATE TABLE IF NOT EXISTS data_proto_table ("
     "  id            INTEGER PRIMARY KEY,"
@@ -233,12 +251,17 @@ static bool importHeaderTable(sqlite3* db, const std::string& csv, ImportStats* 
 
         std::string sql =
             "INSERT OR REPLACE INTO data_header_table"
-            "(data_proto_id, frame_type, frame_len, start_flag, end_flag, endian, reserve) VALUES(" +
+            "(data_proto_id, frame_type, frame_len, start_flag, end_flag, endian, reserve,"
+            " unit, fun_code, data, read_count) VALUES(" +
             integerValue(f[0]) + "," + integerValue(f.size() > 1 ? f[1] : "") + "," +
             integerValue(f.size() > 2 ? f[2] : "") + "," +
             colValue(f.size() > 3 ? f[3] : "") + "," + colValue(f.size() > 4 ? f[4] : "") + "," +
             integerValue(f.size() > 5 ? f[5] : "") + "," +
-            colValue(toUtf8(f.size() > 6 ? f[6] : "")) + ")";
+            colValue(toUtf8(f.size() > 6 ? f[6] : "")) + "," +
+            integerValue(f.size() > 7 ? f[7] : "") + "," +
+            integerValue(f.size() > 8 ? f[8] : "") + "," +
+            integerValue(f.size() > 9 ? f[9] : "") + "," +
+            integerValue(f.size() > 10 ? f[10] : "") + ")";
         if (!execSql(db, sql, err)) return false;
         ++st->rows;
     }

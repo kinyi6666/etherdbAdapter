@@ -1,3 +1,17 @@
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // ============================================================================
 // etherAdapter — frame codec: stream slicing + field decoding
 //
@@ -58,6 +72,14 @@ public:
     // Returns the number of rows appended.
     static int feed(const DeviceDesc& dev, DeviceStream& st,
                     const char* data, size_t len, int64_t recvMs, RowBatch& batch);
+
+    // Feed received bytes for a MODBUS device (register-read responses arrive
+    // on the unified ingest listener). The response header length comes from
+    // frame_type: 9 = MBAP(7)+funCode+byteCount, 7 = MBAP only, 2 = funCode+
+    // byteCount, 0 = raw register bytes. Registers decode big-endian unless
+    // the endian configuration says little. Returns rows appended.
+    static int feedModbus(const DeviceDesc& dev, DeviceStream& st,
+                          const char* data, size_t len, int64_t recvMs, RowBatch& batch);
 
     // Decode the payload of one frame into `row` (must hold fieldCount cells).
     // `frameBytes` is the total frame size including header and end flag.

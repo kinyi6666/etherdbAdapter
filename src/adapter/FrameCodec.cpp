@@ -1,7 +1,23 @@
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // ============================================================================
 // etherAdapter — frame codec (see FrameCodec.h)
 // ============================================================================
 #include "FrameCodec.h"
+
+#include "AdapterLog.h"
 
 #include <algorithm>
 #include <cstring>
@@ -126,27 +142,21 @@ Probe probeFrame(const DeviceDesc& dev, const uint8_t* p, size_t avail,
 } // namespace
 
 // ============================================================================
-// decodeFrame — one frame -> one row
+// decodeFields — payload bytes -> one row (shared by raw_data and modbus)
 // ============================================================================
-bool FrameCodec::decodeFrame(const DeviceDesc& dev, const char* frameBase,
-                             size_t frameBytes, Cell* row) {
-    const FrameSpec& spec = dev.spec;
+namespace {
+
+bool decodeFields(const FrameSpec& spec, bool be, const uint8_t* payload,
+                  size_t payloadLen, Cell* row) {
     const int nFields = (int)spec.fields.size();
     if (nFields == 0) return false;
-
-    const size_t tail = spec.endFlag ? 1 : 0;
-    if (frameBytes < kHeaderSize + tail) return false;
-
-    const uint8_t* payload = (const uint8_t*)frameBase + kHeaderSize;
-    const size_t payloadLen = frameBytes - kHeaderSize - tail;
-
     if ((size_t)spec.payloadMin > payloadLen) return false;   // fields do not fit
 
-    const bool be = dev.bigEndian();
     for (int i = 0; i < nFields; ++i) {
         const FieldDesc& f = spec.fields[i];
         if ((size_t)f.byteOffset + f.size > payloadLen) return false;
 
+        row[i].isNull = 0;
         const uint8_t* p = payload + f.byteOffset;
         switch (f.kind) {
         case FieldKind::Float32:
@@ -167,6 +177,22 @@ bool FrameCodec::decodeFrame(const DeviceDesc& dev, const char* frameBase,
         }
     }
     return true;
+}
+
+} // namespace
+
+// ============================================================================
+// decodeFrame — one raw_data frame -> one row
+// ============================================================================
+bool FrameCodec::decodeFrame(const DeviceDesc& dev, const char* frameBase,
+                             size_t frameBytes, Cell* row) {
+    const FrameSpec& spec = dev.spec;
+    const size_t tail = spec.endFlag ? 1 : 0;
+    if (frameBytes < kHeaderSize + tail) return false;
+
+    const uint8_t* payload = (const uint8_t*)frameBase + kHeaderSize;
+    const size_t payloadLen = frameBytes - kHeaderSize - tail;
+    return decodeFields(spec, dev.bigEndian(), payload, payloadLen, row);
 }
 
 // ============================================================================
@@ -262,6 +288,118 @@ int FrameCodec::feed(const DeviceDesc& dev, DeviceStream& st,
     }
 
     // ── 4. compact the stream buffer ──
+    if (pos > 0)
+        st.buf.erase(st.buf.begin(), st.buf.begin() + (std::ptrdiff_t)pos);
+    if (st.buf.size() > 256 * 1024) {   // mis-sync / runaway peer: keep the tail
+        st.buf.erase(st.buf.begin(), st.buf.end() - 256 * 1024);
+        ++st.resyncs;
+    }
+    return rows;
+}
+
+// ============================================================================
+// feedModbus — register-read responses from conn_proto=modbus devices
+//
+// The response header length is carried by frame_type:
+//   9 = [tid 2][pid 2][len 2][unit 1][funCode 1][byteCount 1] + registers
+//   7 = [tid 2][pid 2][len 2][unit 1] + registers
+//   2 = [funCode 1][byteCount 1] + registers
+//   0 = raw register bytes (no header)
+// Register data is big-endian by default (Model: 0/absent = big, 1 = little).
+// Frames without an MBAP header (0/2) have no sync marker and are sliced at the
+// fixed length  header + max(field byteOffset+size).
+// ============================================================================
+int FrameCodec::feedModbus(const DeviceDesc& dev, DeviceStream& st,
+                           const char* data, size_t len, int64_t recvMs, RowBatch& batch) {
+    const FrameSpec& spec = dev.spec;
+    st.bytesIn += len;
+
+    if (spec.fields.empty()) return 0;
+
+    if (!spec.isModbusHeaderLen()) {
+        if (st.badFrames++ == 0) {
+            EA_LOG_ERROR << "modbus device " << dev.deviceId << ": frame_type "
+                         << spec.frameType
+                         << " is not a valid response header length (0/2/7/9); data dropped";
+        }
+        return 0;
+    }
+
+    const int hdr = spec.frameType;               // 0 / 2 / 7 / 9
+    const size_t payloadNeed = (size_t)spec.payloadMin;
+    if (payloadNeed == 0) {
+        if (st.badFrames++ == 0) {
+            EA_LOG_ERROR << "modbus device " << dev.deviceId
+                         << ": no field layout — cannot slice responses";
+        }
+        return 0;
+    }
+
+    st.buf.insert(st.buf.end(), data, data + len);
+    if ((int)st.rowScratch.size() < dev.fieldCount())
+        st.rowScratch.resize((size_t)dev.fieldCount());
+
+    const bool be = dev.modbusBigEndian();
+    int rows = 0;
+    size_t pos = 0;
+    const size_t n = st.buf.size();
+    const uint8_t* base = (const uint8_t*)st.buf.data();
+
+    while (true) {
+        if (hdr == 7 || hdr == 9) {
+            // ── MBAP-framed response: re-sync on the protocol id (0x0000) ──
+            size_t p = pos;
+            while (p + 4 <= n) {
+                if (base[p + 2] == 0 && base[p + 3] == 0) break;
+                ++p;
+            }
+            if (p + 4 > n) {
+                // Not enough bytes to complete a sync check: drop the scanned
+                // prefix but keep the last 3 bytes (a split pid may complete).
+                const size_t have = n - pos;
+                const size_t keep = (have > 3) ? 3 : have;
+                const size_t drop = have - keep;
+                st.resyncs += drop;
+                pos += drop;
+                break;
+            }
+            if (p != pos) { st.resyncs += (p - pos); pos = p; }
+            if (n - pos < 6) break;    // need the full MBAP prefix
+
+            const size_t mbapLen = ((size_t)base[pos + 4] << 8) | base[pos + 5];
+            if (mbapLen < 1) { ++pos; ++st.resyncs; continue; }
+
+            const size_t total = 6 + mbapLen;
+            if (total > kMaxFrame || total < (size_t)hdr) { ++pos; ++st.resyncs; continue; }
+            if (n - pos < total) break;    // wait for more bytes
+
+            const size_t payloadLen = total - (size_t)hdr;
+            if (payloadLen < payloadNeed) { ++pos; ++st.resyncs; continue; }
+
+            if (!decodeFields(spec, be, base + pos + hdr, payloadLen, st.rowScratch.data())) {
+                ++st.badFrames; ++pos; ++st.resyncs; continue;
+            }
+            ++st.frames;
+            batch.pushRow(recvMs, st.rowScratch.data());
+            ++rows;
+            pos += total;
+        } else {
+            // ── hdr 0/2: fixed-length frames (header + configured payload) ──
+            const size_t total = (size_t)hdr + payloadNeed;
+            if (total > kMaxFrame) return rows;   // configuration problem
+            if (n - pos < total) break;
+
+            if (!decodeFields(spec, be, base + pos + hdr, payloadNeed, st.rowScratch.data())) {
+                ++st.badFrames; ++pos; ++st.resyncs; continue;
+            }
+            ++st.frames;
+            batch.pushRow(recvMs, st.rowScratch.data());
+            ++rows;
+            pos += total;
+        }
+    }
+
+    // ── compact the stream buffer ──
     if (pos > 0)
         st.buf.erase(st.buf.begin(), st.buf.begin() + (std::ptrdiff_t)pos);
     if (st.buf.size() > 256 * 1024) {   // mis-sync / runaway peer: keep the tail

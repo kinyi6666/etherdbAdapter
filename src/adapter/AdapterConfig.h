@@ -1,3 +1,17 @@
+// Copyright (c) 2026 Liu jinwei <kinyi6666@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // ============================================================================
 // etherAdapter — main configuration (etherAdapter.cfg, INI style)
 //
@@ -60,6 +74,25 @@ struct ParseConfig {
 };
 
 // ---------------------------------------------------------------------------
+// [http] — HTTP ingest (single server; slow data, INSERT-SQL write path)
+// ---------------------------------------------------------------------------
+struct HttpConfig {
+    // HTTP listen port. 0 = derive from device_table: the local_server_port of
+    // the conn_proto=http(3) devices (exactly ONE HTTP server is started).
+    uint16_t port = 0;
+};
+
+// ---------------------------------------------------------------------------
+// [modbus] — register-read polling for conn_proto=modbus(2) devices
+// ---------------------------------------------------------------------------
+struct ModbusConfig {
+    // Interval between register-read requests, per device (ms).
+    int pollIntervalMs = 3000;
+    // Connect timeout for the device link (ms).
+    int connectTimeoutMs = 1500;
+};
+
+// ---------------------------------------------------------------------------
 // [log]
 // ---------------------------------------------------------------------------
 struct LogConfig {
@@ -83,6 +116,8 @@ struct AdapterConfig {
     SqliteConfig  sqlite;
     EtherDBConfig etherdb;
     ParseConfig   parse;
+    HttpConfig    http;
+    ModbusConfig  modbus;
     LogConfig     log;
     ZmqConfig     zmq;
 
