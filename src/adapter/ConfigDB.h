@@ -1,0 +1,77 @@
+// ============================================================================
+// etherAdapter — SQLite configuration database reader
+//
+// Reads the three configuration tables and builds the runtime registry
+// (devices + protocol frame specs). The database is opened READ-ONLY: it is
+// intended to be maintained by the plant tooling (or the csv2sqlite helper).
+//
+//   device_table      : per-device configuration (ip/port/protocol ids...)
+//   data_header_table : frame framing per data_proto_id (flags/len/endian)
+//   data_proto_table  : sensor field layout per data_proto_id
+// ============================================================================
+#ifndef ETHERADAPTER_CONFIGDB_H
+#define ETHERADAPTER_CONFIGDB_H
+
+#include "AdapterConfig.h"
+#include "DeviceModel.h"
+
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+struct sqlite3;
+
+namespace EtherAdapter {
+
+class ConfigDB {
+public:
+    ConfigDB() = default;
+    ~ConfigDB();
+
+    ConfigDB(const ConfigDB&) = delete;
+    ConfigDB& operator=(const ConfigDB&) = delete;
+
+    // Open the configuration database (read-only).
+    bool open(const std::string& path, std::string* err);
+    void close();
+
+    // Load all three tables and build the runtime registry.
+    bool loadAll(std::string* err);
+
+    const std::vector<DeviceDesc>& devices() const { return _devices; }
+
+    // Distinct (non-zero) local_server_port values declared in device_table.
+    const std::vector<uint16_t>& listenPorts() const { return _listenPorts; }
+
+    // Protocol spec lookup by data_proto_id (nullptr when absent).
+    const FrameSpec* spec(int dataProtoId) const {
+        auto it = _specs.find(dataProtoId);
+        return it == _specs.end() ? nullptr : &it->second;
+    }
+
+    // Device lookup used by the ingest path:
+    //   1. exact (ip, source port) match
+    //   2. ip-only match when the ip maps to exactly one device
+    // Returns nullptr when the peer cannot be matched.
+    const DeviceDesc* matchDevice(const std::string& ip, uint16_t peerPort) const;
+
+private:
+    bool loadHeaders(std::string* err);
+    bool loadFields(std::string* err);
+    bool loadDevices(std::string* err);
+    void rebuildIndexes();
+
+    sqlite3* _db = nullptr;
+
+    std::vector<DeviceDesc>            _devices;
+    std::unordered_map<int, FrameSpec> _specs;       // data_proto_id -> spec
+    std::vector<uint16_t>              _listenPorts; // sorted, unique
+
+    std::unordered_map<std::string, size_t> _byIpPort;   // "ip:port" -> index
+    std::unordered_map<std::string, size_t> _byIpUnique; // "ip" -> index if unique
+};
+
+} // namespace EtherAdapter
+
+#endif // ETHERADAPTER_CONFIGDB_H

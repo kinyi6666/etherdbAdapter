@@ -1,0 +1,2 @@
+channelID,device_id,device_name,device_ip,device_port,conn_proto,local_server_port,data_proto_id,device_type,endian
+10038,dev_T100_001,T100,127.0.0.1,10002,raw_data(1),60382,100077,,0

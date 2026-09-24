@@ -1,0 +1,20 @@
+需求
+接收设备发送过来的采样数据并进行解析，然后插入到数据库中。
+
+基本的架构
+设备 → muduo → moodycamel → 单线程解析（2亿点/秒） → 写入队列 → EtherDB
+                                                  → 发布队列 → ZMQ PUB
+基本的实现
+解析所需要的配置从sqlite数据库中获取。
+
+数据结构
+ device_tabe ->(通过data_proto_table)关联到data_proto_table 中的字段来解析每个字段的值，一个字段就是一个传感器采集值。对于http或mttq来说，只要字段和类型有意义，这个用来数据库建表。 ->data_header_table 中自定义了数据头（没有标准协议标准头的情况下），否则只是取帧长值，头按照标准协议解析。
+
+解析后的数据插入到etherdb 数据库。
+
+网络使用muduo在服务端口监听，监听端口配置。
+
+可参考D:\document\dcs\dcs-1.0\dcs-1.0\core,main.cpp在project下 项目的实现，数据从接收-》放入队列-》分发-》数据库队列-》插入数据库的实现路径。发布队列暂时不用实现。
+
+2. http的接入 暂时stub
+3. mttq 订阅接入 暂时stub

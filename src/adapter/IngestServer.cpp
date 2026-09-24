@@ -1,0 +1,145 @@
+// ============================================================================
+// etherAdapter — device data ingest (see IngestServer.h)
+// ============================================================================
+#include "IngestServer.h"
+
+#include "AdapterLog.h"
+#include <net/Buffer.h>
+#include <net/EventLoop.h>
+#include <net/TcpConnection.h>
+#include <net/TcpServer.h>
+
+#include <algorithm>
+
+namespace EtherAdapter {
+
+using EtherDB::Timestamp;
+using EtherDB::Net::Buffer;
+using EtherDB::Net::EventLoop;
+using EtherDB::Net::InetAddress;
+using EtherDB::Net::TcpConnection;
+using EtherDB::Net::TcpConnectionPtr;
+using EtherDB::Net::TcpServer;
+
+IngestServer::IngestServer(EventLoop* loop, const ConfigDB& db,
+                           const ServerConfig& cfg, IngestQueue* queue,
+                           AdapterStats* stats)
+    : _loop(loop), _db(db), _cfg(cfg), _queue(queue), _stats(stats) {}
+
+IngestServer::~IngestServer() {
+    stop();
+}
+
+bool IngestServer::start(std::string* err) {
+    std::vector<uint16_t> ports = _db.listenPorts();
+    ports.insert(ports.end(), _cfg.extraListenPorts.begin(), _cfg.extraListenPorts.end());
+    std::sort(ports.begin(), ports.end());
+    ports.erase(std::unique(ports.begin(), ports.end()), ports.end());
+
+    if (ports.empty()) {
+        if (err) {
+            *err = "no listen ports: device_table.local_server_port is empty and "
+                   "[server].extraListenPorts is not configured";
+        }
+        return false;
+    }
+
+    for (uint16_t port : ports) {
+        InetAddress addr(port, false, false);   // 0.0.0.0:<port>
+        std::string name = "ingest:" + std::to_string((unsigned)port);
+
+        std::unique_ptr<TcpServer> srv(new TcpServer(_loop, addr, name));
+
+        srv->setConnectionCallback(
+            [this](const TcpConnectionPtr& conn) { onConnection(conn); });
+        srv->setMessageCallback(
+            [this](const TcpConnectionPtr& conn, Buffer* buf, Timestamp t) {
+                onMessage(conn, buf, t);
+            });
+
+        srv->start();
+        EA_LOG_INFO << "listening for device data on 0.0.0.0:" << (unsigned)port;
+        _servers.push_back(std::move(srv));
+    }
+    return true;
+}
+
+void IngestServer::stop() {
+    _servers.clear();
+    _devByConn.clear();
+}
+
+void IngestServer::onConnection(const TcpConnectionPtr& conn) {
+    if (conn->connected()) {
+        const std::string ip = conn->peerAddress().toIp();
+        const uint16_t port = conn->peerAddress().toPort();
+
+        const DeviceDesc* dev = _db.matchDevice(ip, port);
+        _devByConn[conn.get()] = dev;
+        _stats->connsOpened.fetch_add(1, std::memory_order_relaxed);
+
+        if (dev) {
+            EA_LOG_INFO << "device connected: " << dev->deviceId
+                     << " (channel " << dev->channelId << ", proto " << dev->connProto
+                     << ") from " << ip << ":" << (unsigned)port;
+        } else {
+            EA_LOG_WARN << "unknown peer connected: " << ip << ":" << (unsigned)port
+                     << " (no device_table row matches ip:port)";
+        }
+    } else {
+        auto it = _devByConn.find(conn.get());
+        if (it != _devByConn.end()) {
+            if (it->second) EA_LOG_INFO << "device disconnected: " << it->second->deviceId;
+            _devByConn.erase(it);
+        }
+    }
+}
+
+void IngestServer::onMessage(const TcpConnectionPtr& conn, Buffer* buf, Timestamp t) {
+    const size_t len = buf->readableBytes();
+    if (len == 0) return;
+
+    _stats->bytesIn.fetch_add(len, std::memory_order_relaxed);
+
+    const DeviceDesc* dev = nullptr;
+    auto it = _devByConn.find(conn.get());
+    if (it != _devByConn.end()) dev = it->second;
+
+    if (!dev) {   // lazy re-match (peer port may not have been known at connect time)
+        dev = _db.matchDevice(conn->peerAddress().toIp(), conn->peerAddress().toPort());
+        if (dev) _devByConn[conn.get()] = dev;
+    }
+
+    const bool ingestable = dev && dev->connProto == CONN_RAW_DATA &&
+                            !dev->spec.fields.empty();
+    if (!ingestable) {
+        const uint64_t n = _stats->unmatched.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n == 1 || n % 1000 == 0) {
+            if (!dev) {
+                EA_LOG_WARN << "dropping " << len << " byte(s) from unknown peer "
+                         << conn->peerAddress().toIpPort() << " (unmatched chunks: " << n << ")";
+            } else if (dev->connProto != CONN_RAW_DATA) {
+                EA_LOG_WARN << "dropping " << len << " byte(s) from " << dev->deviceId
+                         << ": conn_proto " << dev->connProto
+                         << " is not implemented yet (unmatched chunks: " << n << ")";
+            } else {
+                EA_LOG_WARN << "dropping " << len << " byte(s) from " << dev->deviceId
+                         << ": no field layout for data_proto_id " << dev->dataProtoId
+                         << " (unmatched chunks: " << n << ")";
+            }
+        }
+        buf->retrieveAll();
+        return;
+    }
+
+    RawChunk chunk;
+    chunk.dev    = dev;
+    chunk.recvMs = t.microSecondsSinceEpoch() / 1000;
+    chunk.data.assign(buf->peek(), buf->peek() + len);
+    buf->retrieveAll();
+
+    _queue->enqueue(std::move(chunk));
+    _stats->chunks.fetch_add(1, std::memory_order_relaxed);
+}
+
+} // namespace EtherAdapter
