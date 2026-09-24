@@ -6,39 +6,50 @@
 > 设计文档：`etherAdapter.txt`（本目录）。
 > 数据流：`设备 → muduo → moodycamel → 单线程解析 → 写入队列 → EtherDB`
 > （发布队列 → ZMQ PUB 已预留，暂未实现）
+> 接入协议：raw_data（设备主动上报）、modbus（适配器 3s 轮询寄存器）、
+> http（单 HTTP 服务端，POST JSON）；mqtt 仍为 stub。
 
 ---
 
 ## 1. 架构
 
 ```
-                         ┌──────────────────────────── muduo (net) ────────────┐
- device (raw_data)  ──►  │ TcpServer(60382, ...)  onMessage → RawChunk          │
-                         └───────────────────────────────┬─────────────────────┘
-                                                         │ ingest queue (moodycamel)
-                                                         ▼
-                                          ┌─ ParserWorker（单线程：切帧 + 字段解析）─┐
-                                          │  FrameCodec: start/end flag, frame_len, │
-                                          │  逐字段 byte_offset/bit/factor 解码      │
-                                          └───────┬──────────────────────┬──────────┘
-                                                  │ RowBatch             │ RowBatch(副本)
-                                                  ▼                      ▼
-                                     write queue (moodycamel)      publish queue
-                                                  │                      │
-                                                  ▼                      ▼
-                                        EtherDBWriter（批量插入）    ZMQ PUB（预留 stub）
-                                                  │
+  raw_data 设备 ──────┐
+                      ▼
+           ┌───────────────── muduo (net) ─────────────────┐
+ modbus 设备 ◄─请求─ ModbusPoller（3s 轮询，长连接）            │
+           │  └─响应─► TcpServer(60382, ...) onMessage → RawChunk │
+           └─────────► TcpServer(60382, ...)   ↑（响应经统一端口进入）
+                      └───────────────────────────┬─────────────────┘
+                                                  │ ingest queue (moodycamel)
+ http 客户端 ──POST JSON──► HttpIngest(独立端口)     │
+                            │ 解析 JSON → RowBatch  │
+                            └──────────► write queue
                                                   ▼
-                                              EtherDB (127.0.0.1:7040)
+                                  ┌─ ParserWorker（单线程：切帧 + 字段解析）─┐
+                                  │  FrameCodec: raw_data 切帧 / modbus 响应头 │
+                                  │  逐字段 byte_offset/bit/factor 解码      │
+                                  └───────┬──────────────────────┬──────────┘
+                                          │ RowBatch             │ RowBatch(副本)
+                                          ▼                      ▼
+                             write queue (moodycamel)      publish queue
+                                          │                      │
+                                          ▼                      ▼
+                                EtherDBWriter（列绑定/直拼 SQL）  ZMQ PUB（预留 stub）
+                                          │
+                                          ▼
+                                      EtherDB (127.0.0.1:7040)
 ```
 
 - 网络：复用 EtherDB 的 muduo 风格网络库（`src/net`）+ base 库（`src/base`），
   与 EtherDB 服务端同一套代码，Windows/Linux 均可构建。
 - 队列：moodycamel `BlockingConcurrentQueue`（`src/base/blockingconcurrentqueue.h`），
   与 EtherDB 服务端同样的 traits（大块 + 块回收）。
-- 解析：**单线程**完成全部协议解析（完全按配置驱动，无硬编码协议）。
-- 写入：EtherDB 客户端 SDK（`ETDB::Client`）列绑定预编译语句
-  `EtDBStmt::bindParamBatch + execute` —— SDK 最快的插入路径。
+- 解析：**单线程**完成全部协议解析（完全按配置驱动，无硬编码协议）：
+  raw_data 帧与 modbus 响应都从统一监听端口进入解析线程。
+- 写入：raw_data/modbus 设备走 SDK 列绑定预编译语句
+  （`EtDBStmt::bindParamBatch + execute`，最快路径）；http 慢速数据直接拼
+  `INSERT INTO ... VALUES(...)`（无需预绑定）。
 
 ## 2. 目录结构
 
@@ -63,12 +74,15 @@ etherAdapter/
 │       ├── ParserWorker.*    单线程解析（解析→批次）
 │       ├── EtherDBWriter.*   批量插入 EtherDB（列绑定 + 预编译）
 │       ├── PublishQueue.*    发布队列（ZMQ PUB 预留 stub）
-│       ├── IngestStubs.*     http / mqtt / modbus 接入（stub）
+│       ├── HttpIngest.*     单一 HTTP 服务端（POST JSON → 写队列）
+│       ├── ModbusPoller.*   modbus 定时寄存器请求（3s，长连接+退避重连）
+│       ├── IngestStubs.*    mqtt 接入（stub）
 │       └── AdapterApp.*     装配与生命周期；main.cpp 入口
 ├── tools/csv2sqlite.cpp      配置 CSV → SQLite 导入工具
-├── tests/device_sim.cpp      设备模拟器（端到端测试）
-│   ├── tests/query_check.cpp 小查询工具（验证工具，链接 SDK）
-│   └── fixtures/             测试用配置 CSV（样例数据的修正版）
+├── tests/device_sim.cpp      raw_data 设备模拟器
+├── tests/modbus_sim.cpp      modbus 设备模拟器（请求响应 + 数据回推）
+├── tests/query_check.cpp     小查询工具（验证工具，链接 SDK）
+├── tests/fixtures/           测试用配置 CSV（样例数据的修正版）
 └── scripts/build_windows.bat / build_linux.sh
 ```
 
@@ -86,7 +100,10 @@ etherAdapter/
 | `[etherdb]` | `host/port/user/password/db` | EtherDB 连接与目标库 |
 | | `createDatabase / createTables` | 启动时自动建库/建表 |
 | | `batchRows / flushIntervalMs` | 插入批大小 / 部分批空闲刷写间隔 |
-| `[parse]` | `frameLenMode` | `auto`(默认探测) / `total` / `payload` |
+| `[parse]` | `frameLenMode` | `auto`(默认探测) / `total` / `payload`（raw_data） |
+| `[http]` | `port` | HTTP 监听端口；0 = 取 device_table 中 http 设备的 local_server_port（只起**一个** HTTP 服务端） |
+| `[modbus]` | `pollIntervalMs` | 寄存器读请求周期（默认 3000ms） |
+| | `connectTimeoutMs` | 设备请求连接的超时（非阻塞 connect，默认 1500ms） |
 | `[log]` | `dir / level` | 异步文件日志目录与级别 |
 | `[zmq]` | `enabled / pubEndpoint` | 发布路径预留（当前为 stub） |
 
@@ -94,16 +111,24 @@ etherAdapter/
 
 解析所需配置全部来自 SQLite 配置库（只读打开），三张表与现场导出保持一致：
 
-- `device_table`：每设备一行。`(device_ip, device_port)` 即设备的对端地址与
-  源端口，适配器据此把 TCP 连接匹配到设备；`local_server_port` 为监听端口；
-  `data_proto_id` 关联另外两张表。`device_id` 同时作为 EtherDB 表名。
-- `data_header_table`：每个 `data_proto_id` 的帧格式：
-  `[start_flag][frame_type][frame_len 2B][payload ...][end_flag]`，
-  `frame_len` 的含义见 `[parse].frameLenMode`（auto 时按 `end_flag` 与字段
-  范围自动探测并锁定）。
+- `device_table`：每设备一行。`(device_ip, device_port)` 用于把连接匹配到设备：
+  raw_data 为设备的源端口；modbus 为设备的**请求端口**（适配器主动连接它发读取命令）；
+  http 设备可留空。`local_server_port` 为适配器监听端口（raw/modbus 共用统一数据端口，
+  http 用自己的独立端口，两类端口不能相同）；`data_proto_id` 关联另外两张表。
+  `device_id` 同时作为 EtherDB 表名。
+- `data_header_table`：每个 `data_proto_id` 的帧格式。
+  - raw_data：`[start_flag][frame_type][frame_len 2B][payload ...][end_flag]`，
+    `frame_len` 含义见 `[parse].frameLenMode`（auto 时按 `end_flag` 与字段
+    范围自动探测并锁定）。
+  - modbus：`frame_type` **即响应头长度**（9/7/2/0）：
+    9 = MBAP(7B)+功能码+字节数，7 = 仅 MBAP，2 = 功能码+字节数，0 = 无头裸寄存器数据；
+    请求参数 `unit / fun_code / data（起始寄存器）/ read_count` 也在此表配置：
+    `[transId 2][0x0000 2][length=6 2][unit 1][fun_code 1][data 2][read_count 2]`
+    （大端，transId 1..0xFE 循环）。
 - `data_proto_table`：每个 `data_proto_id` 的传感器字段表（一个字段=一列）：
   `field_type`（类型码，见 `ConfigDB.cpp::mapFieldType`）、`byte_offset`、
-  `bit_offset/bit_len`（位段）、`factor`（物理值 = 原始值 × factor）。
+  `bit_offset/bit_len`（位段）、`factor`（物理值 = 原始值 × factor；http 的
+  JSON 值视为物理值，不再乘 factor）。
 
 > `field_type` 类型码表与样例数据的对应关系集中在 `src/adapter/ConfigDB.cpp`
 > 的 `mapFieldType()`：`0=BOOL, 1=INT16, 2=INT32, 3=FLOAT32, 4=FLOAT64,
@@ -153,13 +178,20 @@ build\bin\Release\etherAdapter.exe            :: 或 etherAdapter.exe -c <cfg>
 ```
 
 启动后适配器会：连接 EtherDB → `CREATE DATABASE IF NOT EXISTS` + `USE` →
-为每台 raw_data 设备建表 `CREATE TABLE IF NOT EXISTS <device_id> (ts TIMESTAMP, ...)`
-→ 预编译 INSERT → 监听 `device_table.local_server_port` 收数。
+为每台设备建表 `CREATE TABLE IF NOT EXISTS <device_id> (ts TIMESTAMP, ...)`
+→ 预编译 INSERT（http 设备跳过预绑定）→ 然后：
+
+- **raw_data**：监听 `local_server_port`（统一端口），设备主动上报；
+- **modbus**：每 3s（`[modbus].pollIntervalMs`）向设备请求端口发送寄存器读命令
+  （长连接 + 非阻塞 connect + 退避重连），设备的响应仍从统一端口进入；
+- **http**：单独监听一个 HTTP 端口（`[http].port` 或 http 设备的
+  `local_server_port`），设备 POST JSON 即写库。
+
 按 `Ctrl+C` 优雅退出（停止收数 → 解析完存量 → 刷写队列 → 落库）。
 
 数据表结构：`<device_id>(ts TIMESTAMP, <字段1> <类型>, ...)`，
 `ts` = 适配器**接收时间**（毫秒）。运行统计每 5 秒记录到日志
-（`log\etherAdapter*.log`）。
+（`log\etherAdapter*.log`，含 modbus/http 计数）。
 
 ## 6. 端到端测试
 
@@ -183,20 +215,38 @@ query_check.exe 127.0.0.1 7040 adapter "SELECT * FROM dev_T100_001 LIMIT 10"
 （`tests/fixtures/README.md` 有完整步骤说明；fixtures 修正了样例数据中
 `data_proto_id` 100077/100078 的不一致。）
 
+### modbus 测试（fixtures: dev_MB_401, ip 127.0.0.2, 请求端口 10004）
+
+```bat
+modbus_sim.exe -n 3 -m 9 -v 2000 -B 127.0.0.2
+:: -m 9/7/2/0 = 响应头模式（对应 data_header_table.frame_type）
+:: -B 指定推送连接源 IP（模拟设备独立 IP；推送源端口也可用 -b）
+query_check.exe 127.0.0.1 7040 adapter "SELECT * FROM dev_MB_401"
+:: reg1/reg2 = (2000+k)*0.1 / (2100+k)*0.1（大端解码 + factor）
+```
+
+### http 测试（fixtures: dev_HTTP_001, HTTP 端口 60390）
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:60390/ -Body '{"temp":12.5,"humidity":60}'
+# -> {"ok":true,"device":"dev_HTTP_001","matched":2}
+query_check.exe 127.0.0.1 7040 adapter "SELECT * FROM dev_HTTP_001"
+```
+
 ## 7. 当前范围与扩展点
 
 | 能力 | 状态 |
 |---|---|
 | raw_data TCP 接入 + 配置驱动解析 + EtherDB 批量写入 | ✅ 已实现 |
-| HTTP 接入（conn_proto=http(3)） | ⏳ stub（`IngestStubs.h`） |
+| MODBUS 接入（conn_proto=modbus(2)，3s 轮询 + 响应头 9/7/2/0 解析） | ✅ 已实现 |
+| HTTP 接入（conn_proto=http(3)，单服务端 + JSON → 直拼 INSERT SQL） | ✅ 已实现 |
 | MQTT 订阅接入（conn_proto=mttq(4)） | ⏳ stub（`IngestStubs.h`） |
-| MODBUS 接入（conn_proto=modbus(2)） | ⏳ stub（`IngestStubs.h`） |
 | 发布队列 → ZMQ PUB | ⏳ 预留（`PublishQueue`，启用时仅拷贝+丢弃） |
 
 扩展点（保持数据流不变，只加生产者/消费者）：
 
-- **HTTP/MQTT/MODBUS**：把数据组装成 `RawChunk{dev, recvMs, bytes}` 塞进
-  `IngestQueue`（或直接调用 `FrameCodec`）；解析/写入路径完全复用。
+- **MQTT**：仿照 `HttpIngest`（直接解析 → 写队列）或 `ModbusPoller`
+  （请求/订阅 → 统一端口收数）实现，复用现有解析/写入路径。
 - **ZMQ PUB**：实现 `PublishQueue::run()` 里 `TODO(zmq)` 标注的 PUB 发送。
 - **协议维护**：只改 SQLite 三张表；`field_type` 码表集中在
   `ConfigDB.cpp::mapFieldType()`。
@@ -204,10 +254,16 @@ query_check.exe 127.0.0.1 7040 adapter "SELECT * FROM dev_T100_001 LIMIT 10"
 ## 8. 注意事项
 
 - 设备匹配优先级：`(ip, 源端口)` 精确匹配 → 该 IP 唯一设备时按 IP 匹配；
-  都不中则丢弃并限频告警（可在日志统计 `drop` 列观察）。
-- 同一 `local_server_port` 可服务多台设备（按对端区分）；`extraListenPorts`
-  仅用于测试/临时端口。
+  都不中则丢弃并限频告警（可在日志统计 `drop` 列观察）。同 IP 多设备测试时
+  请绑定设备的源端口/IP（参见 `device_sim -b` / `modbus_sim -b/-B`）。
+- 同一 `local_server_port` 可服务多台 raw/modbus 设备（按对端区分）；
+  `extraListenPorts` 仅用于测试/临时端口。**HTTP 端口必须与其他监听端口不同**。
+- modbus 寄存器数据**默认为大端**（协议惯例）：`endian` 配 0/缺省即为大端，
+  配 1 才按小端。raw_data 的 endian 语义不变（0=小端）。
 - `data_proto_table.factor != 1` 的整型字段会按 DOUBLE 列存储（物理值为
-  小数）；无符号整型按相邻更宽的**有符号**列存储（避免溢出）。
+  小数）；无符号整型按相邻更宽的**有符号**列存储（避免溢出）。http 的
+  JSON 数值直接按物理值存储（不再乘 factor）。
+- http 缺失字段写 SQL NULL；查询时 `WHERE col IS NULL` 可正确匹配（列表
+  展示路径会将 NULL 显示为 0，属 EtherDB 查询响应不含 NULL 位图的已知特性）。
 - 现场协议与样例不一致时：`[parse].frameLenMode` 可强制 `total/payload`；
-  帧内 `frame_type` 目前不做校验（仅记录字段中的扩展空间）。
+  帧内 `frame_type` 对 raw_data 不做校验，modbus 下则必须是 0/2/7/9。
