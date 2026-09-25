@@ -1,0 +1,21 @@
+//////////////////////////////////////////////////////////////////////////////////
+//�ļ���Buffer.h 
+//���ߣ�LSPZ
+//ʱ�䣺2018-01-02
+//������������
+////////////////////////////////////////////////////////////////////////////////////
+
+#include "Buffer.h"
+
+namespace EtherDB
+{
+	namespace Net
+	{
+		const char Buffer::kCRLF[] = "\r\n";
+
+		const size_t Buffer::kCheapPrepend = 8;
+		const size_t Buffer::kInitialSize = 2048;
+	}
+}
+
+

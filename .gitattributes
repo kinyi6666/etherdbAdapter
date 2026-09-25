@@ -1,0 +1,13 @@
+# Normalize line endings: store LF in the repository (Linux build hosts and
+# Windows both handle LF sources); batch/shell scripts keep native endings.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.sh  text eol=lf
+
+# Binary assets (do not touch)
+*.dll binary
+*.lib binary
+*.exe binary
+*.so  binary
+*.a   binary

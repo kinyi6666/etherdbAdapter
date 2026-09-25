@@ -1,0 +1,47 @@
+# ============================================================================
+# etherAdapter — git ignore rules
+# ============================================================================
+
+# ---- build output (CMake) ----
+/build/
+
+# ---- build leftovers of the reused libraries (copied from the EtherDB tree) ----
+src/base/build/
+src/base/out/
+src/base/bin/
+src/net/build/
+src/net/out/
+src/net/bin/
+src/adapter/build/
+
+# ---- runtime data / logs (produced next to the exe) ----
+log/
+*.log
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ---- binaries / intermediate objects ----
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.exp
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+*.idb
+*.res
+*.tlog
+
+# ---- editors / OS ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
