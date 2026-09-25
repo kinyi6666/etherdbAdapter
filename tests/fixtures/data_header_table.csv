@@ -1,4 +1,5 @@
-data_proto_id,frame_type,frame_len,start_flag,end_flag,endian,reserve,unit,fun_code,data,read_count
-100077,0,73,0x01,0x03,0,0,,,,
-100081,9,0,,,0,,1,3,0,2
-100082,,,,,,,,,,
+data_proto_id,frame_type,frame_len,start_flag,end_flag,endian,slave_addr,fun_code,start_addr,addr_num
+100077,0xC,73,,,0,,,,
+100078,0xE,62,0x01,0x03,0,,,,
+100081,9,0,,,0,1,3,0,2
+100082,,,,,,,,,

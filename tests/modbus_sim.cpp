@@ -37,8 +37,8 @@
 //                        e.g. 127.0.0.2 to simulate a device on its own IP)
 //     -q                 quiet
 //
-// With the standard fixture (data_proto_table factor 0.1 on reg1/reg2) the
-// stored values are (1000+k)*0.1 and (1100+k)*0.1 for the k-th poll.
+// With the standard fixture the register values are stored RAW (1000+k and
+// 1100+k for the k-th poll): data_proto_table.factor is informational only.
 // ============================================================================
 #include <cstdio>
 #include <cstdlib>

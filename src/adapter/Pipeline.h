@@ -46,6 +46,7 @@ struct AdapterStats {
     std::atomic<uint64_t> frames{0};        // parsed frames
     std::atomic<uint64_t> rowsParsed{0};
     std::atomic<uint64_t> rowsWritten{0};   // rows accepted by EtherDB
+    std::atomic<uint64_t> eventRows{0};     // rows that came from event frames
     std::atomic<uint64_t> batchesWritten{0};
     std::atomic<uint64_t> writeErrors{0};   // failed batch/submit errors
     std::atomic<uint64_t> publishStub{0};   // rows seen by the publish stub
@@ -69,11 +70,30 @@ struct AdapterQueueTraits : public moodycamel::ConcurrentQueueDefaultTraits {
 // Network thread -> parser thread. One chunk = a run of bytes received on one
 // connection (frames are sliced later, on the parser thread — the design
 // keeps ALL protocol parsing on a single thread).
+//
+// The chunk carries the peer GROUP (all device_table rows sharing the
+// connection's ip:port), because the frame type inside each custom_data frame
+// decides which member (status table or an event table) the row belongs to.
 // ---------------------------------------------------------------------------
 struct RawChunk {
-    const DeviceDesc* dev = nullptr;
-    int64_t           recvMs = 0;
-    std::vector<char> data;
+    const DeviceGroup* group = nullptr;
+    int64_t            recvMs = 0;
+    std::vector<char>  data;
+};
+
+// ---------------------------------------------------------------------------
+// Row sink used by FrameCodec: one decoded record lands here. It is a plain
+// function pointer (no std::function) so the hot parse loop stays allocation-
+// and indirection-light; the parser thread passes itself as `ctx` and appends
+// the row to the per-device batch.
+// ---------------------------------------------------------------------------
+struct RowSink {
+    void (*fn)(void* ctx, const DeviceDesc* dev, int64_t ts, const Cell* row) = nullptr;
+    void* ctx = nullptr;
+
+    inline void push(const DeviceDesc* dev, int64_t ts, const Cell* row) const {
+        fn(ctx, dev, ts, row);
+    }
 };
 
 // ---------------------------------------------------------------------------

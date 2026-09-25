@@ -20,6 +20,10 @@
 // [server].extraListenPorts. Every received chunk is matched against
 // device_table by (peer ip, peer port) and pushed into the ingest queue —
 // frame slicing/parsing happens later on the single parser thread.
+//
+// A connection binds to a DeviceGroup, not to a single device: several
+// device_table rows may share the peer endpoint (status + event streams), and
+// the frame type in each custom_data frame selects the member.
 // ============================================================================
 #ifndef ETHERADAPTER_INGESTSERVER_H
 #define ETHERADAPTER_INGESTSERVER_H
@@ -76,8 +80,8 @@ private:
     AdapterStats*            _stats;
 
     std::vector<std::unique_ptr<EtherDB::Net::TcpServer>> _servers;
-    // Connection -> device binding (loop-thread only, no locking needed).
-    std::unordered_map<const EtherDB::Net::TcpConnection*, const DeviceDesc*> _devByConn;
+    // Connection -> peer group binding (loop-thread only, no locking needed).
+    std::unordered_map<const EtherDB::Net::TcpConnection*, const DeviceGroup*> _groupByConn;
 };
 
 } // namespace EtherAdapter

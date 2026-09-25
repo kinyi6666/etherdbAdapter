@@ -100,7 +100,7 @@ std::string readText(sqlite3_stmt* st, int col) {
     return t ? std::string((const char*)t) : std::string();
 }
 
-// "raw_data(1)" / "modbus (2)" / "4" -> protocol number (0 when unknown)
+// "custom_data(1)" / "modbus (2)" / "4" -> protocol number (0 when unknown)
 int parseConnProto(const std::string& text) {
     size_t l = text.find('(');
     size_t r = (l == std::string::npos) ? std::string::npos : text.find(')', l);
@@ -154,24 +154,14 @@ bool mapFieldType(int code, FieldKind* kind, uint8_t* size) {
 //   outSize    stored bytes per value
 //   bindType   EtDBStmt::BindType value (parameter binding)
 //   colType    EtherDB column type for CREATE TABLE
-//   asDouble   factor != 1 -> value stored as double (raw * factor)
+//   asDouble   true only for FLOAT32/FLOAT64 (Cell::v.d), integers use v.i
 //
 // Unsigned integers are widened to the next signed type so no value can
-// overflow the column. Integer fields with a scaling factor are stored as
-// DOUBLE (the physical value is fractional).
+// overflow the column. data_proto_table.factor is IGNORED: the database stores
+// raw values (see the design notes), so no integer field is scaled to DOUBLE.
 // ----------------------------------------------------------------------------
 void materializeField(FieldDesc& f, int index) {
     f.name = makeIdentifier(f.name, "f" + std::to_string(index));
-
-    double factor = (f.factor == 0.0) ? 1.0 : f.factor;  // 0 factor means "unset"
-    f.factor = factor;
-
-    bool scaled = (factor != 1.0);
-    if (scaled && f.kind != FieldKind::Float32 && f.kind != FieldKind::Float64 &&
-        f.kind != FieldKind::Bool &&
-        f.kind != FieldKind::IntSigned && f.kind != FieldKind::IntUnsigned) {
-        scaled = false;
-    }
 
     switch (f.kind) {
     case FieldKind::Bool:
@@ -182,7 +172,7 @@ void materializeField(FieldDesc& f, int index) {
         break;
 
     case FieldKind::Float32:
-        f.asDouble = true;    // physical value (raw * factor) stored as double
+        f.asDouble = true;    // raw float value, stored as FLOAT
         f.outSize  = 4;
         f.bindType = kBindFloat;
         f.colType  = "FLOAT";
@@ -196,36 +186,22 @@ void materializeField(FieldDesc& f, int index) {
         break;
 
     case FieldKind::IntSigned:
-        if (scaled) {
-            f.asDouble = true;
-            f.outSize  = 8;
-            f.bindType = kBindDouble;
-            f.colType  = "DOUBLE";
-        } else {
-            f.asDouble = false;
-            f.outSize  = f.size;
-            switch (f.size) {
-            case 1:  f.bindType = kBindTinyInt;  f.colType = "TINYINT";  break;
-            case 2:  f.bindType = kBindSmallInt; f.colType = "SMALLINT"; break;
-            case 4:  f.bindType = kBindInt;      f.colType = "INT";      break;
-            default: f.bindType = kBindBigInt;   f.colType = "BIGINT";   break;
-            }
+        f.asDouble = false;
+        f.outSize  = f.size;
+        switch (f.size) {
+        case 1:  f.bindType = kBindTinyInt;  f.colType = "TINYINT";  break;
+        case 2:  f.bindType = kBindSmallInt; f.colType = "SMALLINT"; break;
+        case 4:  f.bindType = kBindInt;      f.colType = "INT";      break;
+        default: f.bindType = kBindBigInt;   f.colType = "BIGINT";   break;
         }
         break;
 
     case FieldKind::IntUnsigned:
-        if (scaled) {
-            f.asDouble = true;
-            f.outSize  = 8;
-            f.bindType = kBindDouble;
-            f.colType  = "DOUBLE";
-        } else {
-            f.asDouble = false;
-            switch (f.size) {   // widen: no unsigned column type in the SDK bind API
-            case 1:  f.outSize = 2; f.bindType = kBindSmallInt; f.colType = "SMALLINT"; break;
-            case 2:  f.outSize = 4; f.bindType = kBindInt;      f.colType = "INT";      break;
-            default: f.outSize = 8; f.bindType = kBindBigInt;   f.colType = "BIGINT";   break;
-            }
+        f.asDouble = false;
+        switch (f.size) {   // widen: no unsigned column type in the SDK bind API
+        case 1:  f.outSize = 2; f.bindType = kBindSmallInt; f.colType = "SMALLINT"; break;
+        case 2:  f.outSize = 4; f.bindType = kBindInt;      f.colType = "INT";      break;
+        default: f.outSize = 8; f.bindType = kBindBigInt;   f.colType = "BIGINT";   break;
         }
         break;
     }
@@ -302,27 +278,36 @@ bool ConfigDB::loadAll(std::string* err) {
 }
 
 bool ConfigDB::loadHeaders(std::string* err) {
-    // Newer schema carries the modbus request columns (unit / fun_code / data /
-    // read_count); fall back to the old column set when the database predates
-    // them (modbus polling will be disabled then).
+    // Current schema carries the modbus request columns (slave_addr / fun_code /
+    // start_addr / addr_num); older databases used unit / data / read_count and
+    // may lack them entirely. Modbus polling is disabled when they are missing.
     const char* sqlNew =
+        "SELECT data_proto_id, frame_type, frame_len, start_flag, end_flag, endian, "
+        "       slave_addr, fun_code, start_addr, addr_num "
+        "FROM data_header_table";
+    const char* sqlLegacy =
         "SELECT data_proto_id, frame_type, frame_len, start_flag, end_flag, endian, "
         "       unit, fun_code, data, read_count "
         "FROM data_header_table";
-    const char* sqlOld =
+    const char* sqlMinimal =
         "SELECT data_proto_id, frame_type, frame_len, start_flag, end_flag, endian "
         "FROM data_header_table";
 
     sqlite3_stmt* st = nullptr;
     bool withModbus = (sqlite3_prepare_v2(_db, sqlNew, -1, &st, nullptr) == SQLITE_OK);
     if (!withModbus) {
-        if (sqlite3_prepare_v2(_db, sqlOld, -1, &st, nullptr) != SQLITE_OK) {
+        if (sqlite3_prepare_v2(_db, sqlLegacy, -1, &st, nullptr) == SQLITE_OK) {
+            withModbus = true;
+            EA_LOG_WARN << "data_header_table uses the legacy modbus columns "
+                        << "(unit/data/read_count); re-import the configuration to "
+                        << "upgrade to slave_addr/start_addr/addr_num";
+        } else if (sqlite3_prepare_v2(_db, sqlMinimal, -1, &st, nullptr) == SQLITE_OK) {
+            EA_LOG_WARN << "data_header_table has no modbus request columns; "
+                        << "modbus polling disabled";
+        } else {
             if (err) *err = std::string("data_header_table: ") + sqlite3_errmsg(_db);
             return false;
         }
-        EA_LOG_WARN << "data_header_table has no modbus request columns "
-                    << "(unit/fun_code/data/read_count); modbus polling disabled — "
-                    << "re-import the configuration to upgrade the schema";
     }
 
     int n = 0;
@@ -338,10 +323,16 @@ bool ConfigDB::loadHeaders(std::string* err) {
         s.endFlag     = (uint8_t)readUInt32(st, 4, 0);
         s.endian      = (int)readInt64(st, 5, 0);
         if (withModbus) {
-            s.unit      = (int)readInt64(st, 6, 0);
+            s.slaveAddr = (int)readInt64(st, 6, 0);
             s.funCode   = (int)readInt64(st, 7, 0);
-            s.dataAddr  = (int)readInt64(st, 8, -1);
-            s.readCount = (int)readInt64(st, 9, 0);
+            s.startAddr = (int)readInt64(st, 8, -1);
+            s.addrNum   = (int)readInt64(st, 9, 0);
+        }
+        if (s.startFlag != 0 && s.endFlag != 0 && s.startFlag != s.endFlag) {
+            EA_LOG_INFO << "data_header_table: proto " << pid << " start_flag 0x"
+                        << std::hex << (unsigned)s.startFlag << std::dec << " != end_flag 0x"
+                        << std::hex << (unsigned)s.endFlag << std::dec
+                        << "; using them as the leading / trailing event delimiter";
         }
         _specs[pid]   = std::move(s);
         ++n;
@@ -388,7 +379,12 @@ bool ConfigDB::loadFields(std::string* err) {
         f.bitOffset  = (uint8_t)readUInt32(st, 5, 0);
         f.bitLen     = (uint8_t)readUInt32(st, 6, 0);
         f.precision  = (int)readInt64(st, 7, 0);
-        f.factor     = readDouble(st, 8, 1.0);
+        const double factor = readDouble(st, 8, 1.0);
+        if (factor != 0.0 && factor != 1.0) {
+            EA_LOG_WARN << "data_proto_table: field '" << f.name << "' (proto " << pid
+                        << ") has factor " << factor
+                        << " — factors are ignored, raw values are stored";
+        }
 
         if (f.bitLen > 0 && (int)f.bitOffset + (int)f.bitLen > (int)f.size * 8) {
             EA_LOG_WARN << "data_proto_table: field '" << f.name << "' (proto " << pid
@@ -412,8 +408,10 @@ bool ConfigDB::loadFields(std::string* err) {
 }
 
 bool ConfigDB::loadDevices(std::string* err) {
+    // Row identity is device_id (the channelID column was dropped from the
+    // plant export); rows without an ip or device_id are annotations and skipped.
     const char* sql =
-        "SELECT channelID, device_id, device_name, device_ip, device_port, "
+        "SELECT device_id, device_name, device_ip, device_port, "
         "       conn_proto, local_server_port, data_proto_id, endian "
         "FROM device_table";
     sqlite3_stmt* st = nullptr;
@@ -424,37 +422,42 @@ bool ConfigDB::loadDevices(std::string* err) {
 
     int n = 0;
     while (sqlite3_step(st) == SQLITE_ROW) {
-        int64_t ch = readInt64(st, 0, -1);
-        if (ch <= 0) continue;   // header/comment rows
+        const int rowIndex = n;   // fallback id for rows without a device_id
 
-        std::string ip = readText(st, 3);
+        std::string deviceId = readText(st, 0);
+        std::string ip       = readText(st, 2);
+        if (deviceId.empty() && ip.empty()) continue;      // comment/annotation row
+        if (deviceId.empty()) {
+            EA_LOG_WARN << "device_table: row " << (rowIndex + 1)
+                        << " has no device_id; row skipped";
+            continue;
+        }
         if (ip.empty()) {
-            EA_LOG_WARN << "device_table: channel " << ch << " has no device_ip; row skipped";
+            EA_LOG_WARN << "device_table: device " << deviceId
+                        << " has no device_ip; row skipped";
             continue;
         }
 
         DeviceDesc d;
-        d.channelId = (int)ch;
+        const std::string fallbackId = "device_" + std::to_string(rowIndex + 1);
+        d.deviceId = makeIdentifier(deviceId, fallbackId);
 
-        d.deviceId = readText(st, 1);
-        if (d.deviceId.empty()) d.deviceId = "channel_" + std::to_string(ch);
-        d.deviceId = makeIdentifier(d.deviceId, "channel_" + std::to_string(ch));
-
-        d.deviceName      = readText(st, 2);
+        d.deviceName      = readText(st, 1);
         d.ip              = ip;
-        d.devicePort      = (uint16_t)readUInt32(st, 4, 0);
-        d.connProto       = parseConnProto(readText(st, 5));
-        d.localServerPort = (uint16_t)readUInt32(st, 6, 0);
-        d.dataProtoId     = (int)readInt64(st, 7, 0);
-        d.endian          = (int)readInt64(st, 8, 0);
+        d.devicePort      = (uint16_t)readUInt32(st, 3, 0);
+        d.connProto       = parseConnProto(readText(st, 4));
+        d.localServerPort = (uint16_t)readUInt32(st, 5, 0);
+        d.dataProtoId     = (int)readInt64(st, 6, 0);
+        d.endian          = (int)readInt64(st, 7, 0);
 
         if (d.connProto == 0) {
-            EA_LOG_WARN << "device_table: channel " << ch
-                     << " has no usable conn_proto; assuming raw_data(1)";
-            d.connProto = CONN_RAW_DATA;
+            EA_LOG_WARN << "device_table: device " << d.deviceId
+                     << " has no usable conn_proto; assuming custom_data(1)";
+            d.connProto = CONN_CUSTOM_DATA;
         }
         if (d.localServerPort == 0) {
-            EA_LOG_WARN << "device_table: channel " << ch << " has no local_server_port; "
+            EA_LOG_WARN << "device_table: device " << d.deviceId
+                     << " has no local_server_port; "
                      << "device will only be reachable on ports opened by other rows "
                      << "or [server].extraListenPorts";
         }
@@ -476,60 +479,126 @@ bool ConfigDB::loadDevices(std::string* err) {
     return true;
 }
 
+// ============================================================================
+// Peer groups + indexes
+//
+// Devices sharing one (ip, device_port) endpoint form ONE group so that a
+// single TCP connection can carry the periodic STATUS sampling and one or more
+// EVENT streams with different point counts — the frame type in the custom
+// header selects the device (and therefore the EtherDB table). The first member
+// (lowest data_proto_id) is the status device.
+// ============================================================================
 void ConfigDB::rebuildIndexes() {
-    _byIpPort.clear();
-    _byIpUnique.clear();
+    _groups.clear();
+    _groupByIpPort.clear();
+    _groupByIpUnique.clear();
     _listenPorts.clear();
     _httpListenPorts.clear();
     _httpByPort.clear();
 
-    // Count devices per ip first (to know which ips map to exactly one device).
-    std::unordered_map<std::string, int> ipCount;
+    // ── 1. listen ports ──
     for (const DeviceDesc& d : _devices) {
-        ++ipCount[d.ip];
         if (d.localServerPort == 0) continue;
         if (d.connProto == CONN_HTTP) {
             _httpListenPorts.push_back(d.localServerPort);
             _httpByPort.emplace(d.localServerPort, &d);   // first http device wins
-        } else if (d.connProto == CONN_RAW_DATA || d.connProto == CONN_MODBUS) {
+        } else if (d.connProto == CONN_CUSTOM_DATA || d.connProto == CONN_MODBUS) {
             _listenPorts.push_back(d.localServerPort);
         }
         // other protocols (mqtt, ...) are not served yet
     }
-
-    for (size_t i = 0; i < _devices.size(); ++i) {
-        const DeviceDesc& d = _devices[i];
-        if (d.devicePort != 0) {
-            std::string key = d.ip + ":" + std::to_string((unsigned)d.devicePort);
-            auto it = _byIpPort.find(key);
-            if (it == _byIpPort.end()) {
-                _byIpPort.emplace(std::move(key), i);
-            } else {
-                EA_LOG_WARN << "device_table: duplicate ip:port " << d.ip << ":"
-                         << (unsigned)d.devicePort << " (channels "
-                         << _devices[it->second].channelId << " and " << d.channelId
-                         << "); keeping the first";
-            }
-        }
-        if (ipCount[d.ip] == 1) _byIpUnique[d.ip] = i;
-    }
-
     std::sort(_listenPorts.begin(), _listenPorts.end());
     _listenPorts.erase(std::unique(_listenPorts.begin(), _listenPorts.end()),
                        _listenPorts.end());
     std::sort(_httpListenPorts.begin(), _httpListenPorts.end());
     _httpListenPorts.erase(std::unique(_httpListenPorts.begin(), _httpListenPorts.end()),
                            _httpListenPorts.end());
+
+    // ── 2. group devices by endpoint ──
+    _groups.reserve(_devices.size());
+    for (size_t i = 0; i < _devices.size(); ++i) {
+        DeviceDesc& d = _devices[i];
+
+        size_t gi = SIZE_MAX;
+        if (d.devicePort != 0) {
+            const std::string key = d.ip + ":" + std::to_string((unsigned)d.devicePort);
+            auto it = _groupByIpPort.find(key);
+            if (it != _groupByIpPort.end()) {
+                gi = it->second;
+            } else {
+                gi = _groups.size();
+                _groups.emplace_back();
+                _groups[gi].key = key;
+                _groupByIpPort.emplace(key, gi);
+            }
+        } else {
+            // No source port configured (e.g. http): a standalone group, never
+            // merged with another row, so the port-based match cannot collide.
+            gi = _groups.size();
+            _groups.emplace_back();
+            _groups[gi].key = d.ip + ":0#" + std::to_string(i);
+        }
+        _groups[gi].members.push_back(&d);
+    }
+
+    // ── 3. rank members: status first, then events; wire up the routing ──
+    for (DeviceGroup& g : _groups) {
+        std::sort(g.members.begin(), g.members.end(),
+                  [](const DeviceDesc* a, const DeviceDesc* b) {
+                      if (a->dataProtoId != b->dataProtoId)
+                          return a->dataProtoId < b->dataProtoId;
+                      return a->deviceId < b->deviceId;
+                  });
+
+        const int baseProto = g.members.front()->dataProtoId;
+        for (size_t k = 0; k < g.members.size(); ++k) {
+            DeviceDesc* d = const_cast<DeviceDesc*>(g.members[k]);
+            d->group      = &g;
+            d->isEvent    = (k > 0);
+            d->eventType  = d->isEvent ? (d->dataProtoId - baseProto) : 0;
+            // Status data (the normal 1 Hz sampling) is submitted as soon as it
+            // arrives; event bursts keep batching (they are high rate).
+            d->immediateFlush = (!d->isEvent && d->connProto == CONN_CUSTOM_DATA);
+        }
+        if (g.members.size() > 1) {
+            std::string ids;
+            for (const DeviceDesc* m : g.members) {
+                if (!ids.empty()) ids += ", ";
+                ids += m->deviceId + "(" + std::to_string(m->spec.frameType) + ")";
+            }
+            EA_LOG_INFO << "endpoint " << g.key << " carries " << g.members.size()
+                        << " measurement sets: " << ids
+                        << " (first = status, rest = events)";
+        }
+    }
+
+    // ── 4. ip-only fallback when exactly one group uses that ip ──
+    std::unordered_map<std::string, int> ipGroups;
+    for (const DeviceGroup& g : _groups) {
+        const size_t colon = g.key.find(':');
+        const std::string ip = g.key.substr(0, colon);
+        ++ipGroups[ip];
+    }
+    for (size_t gi = 0; gi < _groups.size(); ++gi) {
+        const std::string& key = _groups[gi].key;
+        const std::string ip = key.substr(0, key.find(':'));
+        if (ipGroups[ip] == 1) _groupByIpUnique[ip] = gi;
+    }
+}
+
+const DeviceGroup* ConfigDB::matchGroup(const std::string& ip, uint16_t peerPort) const {
+    auto it = _groupByIpPort.find(ip + ":" + std::to_string((unsigned)peerPort));
+    if (it != _groupByIpPort.end()) return &_groups[it->second];
+
+    auto it2 = _groupByIpUnique.find(ip);
+    if (it2 != _groupByIpUnique.end()) return &_groups[it2->second];
+
+    return nullptr;
 }
 
 const DeviceDesc* ConfigDB::matchDevice(const std::string& ip, uint16_t peerPort) const {
-    auto it = _byIpPort.find(ip + ":" + std::to_string((unsigned)peerPort));
-    if (it != _byIpPort.end()) return &_devices[it->second];
-
-    auto it2 = _byIpUnique.find(ip);
-    if (it2 != _byIpUnique.end()) return &_devices[it2->second];
-
-    return nullptr;
+    const DeviceGroup* g = matchGroup(ip, peerPort);
+    return g ? g->primary() : nullptr;
 }
 
 const DeviceDesc* ConfigDB::matchHttpDevice(const std::string& ip, uint16_t peerPort,

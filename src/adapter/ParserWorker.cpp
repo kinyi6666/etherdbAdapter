@@ -22,12 +22,10 @@
 namespace EtherAdapter {
 
 ParserWorker::ParserWorker(IngestQueue* ingest, WriteQueue* write, PublishQueue* publish,
-                           FrameLenMode frameLenMode, int batchRows, int flushIntervalMs,
-                           AdapterStats* stats)
+                           int batchRows, int flushIntervalMs, AdapterStats* stats)
     : _ingest(ingest),
       _write(write),
       _publish(publish),
-      _frameLenMode(frameLenMode),
       _batchRows(batchRows > 0 ? batchRows : 1),
       _flushIntervalMs(flushIntervalMs > 0 ? flushIntervalMs : 20),
       _stats(stats) {}
@@ -52,36 +50,50 @@ void ParserWorker::stop() {
 void ParserWorker::run() {
     const int64_t idleUs = 10000;   // dequeue poll: 10 ms
 
+    RowSink sink;
+    sink.fn  = &ParserWorker::appendRow;
+    sink.ctx = this;
+
     while (_running.load(std::memory_order_relaxed)) {
         RawChunk chunk;
         if (_ingest->wait_dequeue_timed(chunk, idleUs)) {
-            if (!chunk.dev || chunk.data.empty()) continue;
+            if (!chunk.group || chunk.data.empty()) continue;
 
-            // Per-device stream buffer (created on first data). A configured
-            // non-auto frameLenMode (total/payload) skips the runtime probe.
-            auto ins = _streams.emplace(chunk.dev, DeviceStream());
-            DeviceStream& st = ins.first->second;
-            if (ins.second) {
-                st.lenMode  = _frameLenMode;
-                st.resolved = (_frameLenMode != FrameLenMode::Auto);
-            }
+            // Per-endpoint stream buffer (created on first data).
+            DeviceStream& st = _streams.emplace(chunk.group, DeviceStream()).first->second;
 
-            RowBatch& batch = _batches[chunk.dev];
-            if (!batch.dev) {
-                batch.dev = chunk.dev;
-                batch.reserveRows(_batchRows);
-            }
-
-            const int rows = (chunk.dev->connProto == CONN_MODBUS)
-                ? FrameCodec::feedModbus(*chunk.dev, st, chunk.data.data(),
-                                         chunk.data.size(), chunk.recvMs, batch)
-                : FrameCodec::feed(*chunk.dev, st, chunk.data.data(),
-                                   chunk.data.size(), chunk.recvMs, batch);
+            _touched.clear();
+            const DeviceDesc* first = chunk.group->primary();
+            const int rows = (first && first->connProto == CONN_MODBUS)
+                ? FrameCodec::feedModbus(*first, st, chunk.data.data(),
+                                         chunk.data.size(), chunk.recvMs, sink)
+                : FrameCodec::feed(*chunk.group, st, chunk.data.data(),
+                                   chunk.data.size(), chunk.recvMs, sink);
             if (rows > 0) {
                 _stats->frames.fetch_add((uint64_t)rows, std::memory_order_relaxed);
                 _stats->rowsParsed.fetch_add((uint64_t)rows, std::memory_order_relaxed);
             }
-            if (batch.rowCount() >= _batchRows) flushBatch(chunk.dev);
+
+            // A frame type with no device_table row would be dropped silently;
+            // report it once per endpoint so the config gap is visible.
+            if (st.unknownType != st.unknownTypeLogged) {
+                if (st.unknownTypeLogged == 0) {
+                    EA_LOG_WARN << "endpoint " << chunk.group->key << ": data with an "
+                                << "unconfigured frame type arrived — add a device_table "
+                                << "row (and data_header_table.frame_type) for it, "
+                                << "otherwise those frames are dropped";
+                }
+                st.unknownTypeLogged = st.unknownType;
+            }
+
+            // Status data (~1 Hz) is submitted as soon as it arrives; event
+            // bursts stay batched until batchRows (or the idle flush).
+            for (const DeviceDesc* d : _touched) {
+                auto it = _batches.find(d);
+                if (it == _batches.end() || it->second.empty()) continue;
+                if (d->immediateFlush || it->second.rowCount() >= _batchRows)
+                    flushDevice(d);
+            }
         } else {
             flushAll();   // idle: push whatever partial batches exist
         }
@@ -90,7 +102,27 @@ void ParserWorker::run() {
     flushAll();
 }
 
-void ParserWorker::flushBatch(const DeviceDesc* dev) {
+// ---------------------------------------------------------------------------
+// RowSink callback (parser thread): one decoded record -> its device's batch.
+// ---------------------------------------------------------------------------
+void ParserWorker::appendRow(void* ctx, const DeviceDesc* dev, int64_t ts, const Cell* row) {
+    ParserWorker* self = static_cast<ParserWorker*>(ctx);
+
+    RowBatch& batch = self->_batches[dev];
+    if (!batch.dev) {
+        batch.dev = dev;
+        batch.reserveRows(self->_batchRows);
+    }
+    batch.pushRow(ts, row);
+
+    if (dev->isEvent)
+        self->_stats->eventRows.fetch_add(1, std::memory_order_relaxed);
+
+    if (self->_touched.empty() || self->_touched.back() != dev)
+        self->_touched.push_back(dev);
+}
+
+void ParserWorker::flushDevice(const DeviceDesc* dev) {
     auto it = _batches.find(dev);
     if (it == _batches.end() || it->second.empty()) return;
 
@@ -105,7 +137,7 @@ void ParserWorker::flushBatch(const DeviceDesc* dev) {
 
 void ParserWorker::flushAll() {
     for (auto& kv : _batches) {
-        if (!kv.second.empty()) flushBatch(kv.first);
+        if (!kv.second.empty()) flushDevice(kv.first);
     }
 }
 

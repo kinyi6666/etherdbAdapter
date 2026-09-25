@@ -20,6 +20,10 @@
 //
 // The design keeps ALL protocol parsing on one thread; the network threads
 // only copy bytes into the ingest queue.
+//
+// A chunk carries a peer GROUP rather than a single device: the frame type in
+// the custom header picks the member (status table or an event table). Status
+// data (~1 Hz) is flushed as soon as it arrives; event bursts stay batched.
 // ============================================================================
 #ifndef ETHERADAPTER_PARSERWORKER_H
 #define ETHERADAPTER_PARSERWORKER_H
@@ -33,14 +37,14 @@
 #include <cstdint>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace EtherAdapter {
 
 class ParserWorker {
 public:
     ParserWorker(IngestQueue* ingest, WriteQueue* write, PublishQueue* publish,
-                 FrameLenMode frameLenMode, int batchRows, int flushIntervalMs,
-                 AdapterStats* stats);
+                 int batchRows, int flushIntervalMs, AdapterStats* stats);
     ~ParserWorker();
 
     ParserWorker(const ParserWorker&) = delete;
@@ -51,13 +55,15 @@ public:
 
 private:
     void run();
-    void flushBatch(const DeviceDesc* dev);
+    void flushDevice(const DeviceDesc* dev);
     void flushAll();
+
+    // RowSink callback: append one decoded record to its device's batch.
+    static void appendRow(void* ctx, const DeviceDesc* dev, int64_t ts, const Cell* row);
 
     IngestQueue*  _ingest;
     WriteQueue*   _write;
     PublishQueue* _publish;
-    FrameLenMode  _frameLenMode;
     int           _batchRows;
     int           _flushIntervalMs;
     AdapterStats* _stats;
@@ -66,8 +72,9 @@ private:
     std::atomic<bool> _running{false};
 
     // Parser-thread-only state.
-    std::unordered_map<const DeviceDesc*, DeviceStream> _streams;
+    std::unordered_map<const DeviceGroup*, DeviceStream> _streams;
     std::unordered_map<const DeviceDesc*, RowBatch>     _batches;
+    std::vector<const DeviceDesc*> _touched;   // devices seen in the current chunk
 };
 
 } // namespace EtherAdapter

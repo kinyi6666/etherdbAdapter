@@ -118,8 +118,8 @@ AdapterConfig AdapterConfig::load(const std::string& cfgFile) {
     if (cfg.etherdb.batchRows < 1)   cfg.etherdb.batchRows = 1;
     if (cfg.etherdb.flushIntervalMs < 1) cfg.etherdb.flushIntervalMs = 1;
 
-    // [parse]
-    cfg.parse.frameLenMode = ini.get("parse", "frameLenMode", cfg.parse.frameLenMode);
+    // [parse] is gone: custom_data frames carry their payload length in the
+    // custom header (data_header_table.frame_len / row).
 
     // [http]
     cfg.http.port = (uint16_t)ini.getInt("http", "port", cfg.http.port);

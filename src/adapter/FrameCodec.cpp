@@ -24,12 +24,6 @@
 
 namespace EtherAdapter {
 
-FrameLenMode parseFrameLenMode(const std::string& text) {
-    if (text == "total")   return FrameLenMode::Total;
-    if (text == "payload") return FrameLenMode::Payload;
-    return FrameLenMode::Auto;
-}
-
 namespace {
 
 // Load `size` raw bytes as an integer honouring the byte order.
@@ -90,64 +84,15 @@ inline double loadFloat64(const uint8_t* p, bool be) {
     return d;
 }
 
-enum class Probe { Ok, NeedMore, Corrupt };
-
-// Decide which frame-length interpretation fits the bytes at `p`.
-// Uses the end flag when configured AND the field extents (payloadMin), so a
-// wrong guess is caught before any row is produced.
-Probe probeFrame(const DeviceDesc& dev, const uint8_t* p, size_t avail,
-                 FrameLenMode* outMode, size_t* outTotal) {
-    const FrameSpec& spec = dev.spec;
-    const bool be = dev.bigEndian();
-
-    int lenVal = be ? (((int)p[2] << 8) | p[3]) : (p[2] | ((int)p[3] << 8));
-    if (lenVal <= 0) lenVal = spec.frameLen;
-    if (lenVal <= 0) return Probe::Corrupt;
-
-    const size_t tail = spec.endFlag ? 1 : 0;
-    const size_t minPayload = (size_t)spec.payloadMin;
-
-    const size_t tTotal   = (size_t)lenVal;
-    const size_t tPayload = FrameCodec::kHeaderSize + (size_t)lenVal + tail;
-
-    const bool fitT = tTotal   >= FrameCodec::kHeaderSize + tail &&
-                      tTotal   <= FrameCodec::kMaxFrame &&
-                      (tTotal   - FrameCodec::kHeaderSize - tail) >= minPayload;
-    const bool fitP = tPayload >= FrameCodec::kHeaderSize + tail &&
-                      tPayload <= FrameCodec::kMaxFrame &&
-                      (size_t)lenVal >= minPayload;
-
-    if (spec.endFlag == 0) {
-        // No tail marker available: trust "total" when it fits, else "payload".
-        if (fitT) { *outMode = FrameLenMode::Total;   *outTotal = tTotal;   return Probe::Ok; }
-        if (fitP) { *outMode = FrameLenMode::Payload; *outTotal = tPayload; return Probe::Ok; }
-        return Probe::Corrupt;
-    }
-
-    if (fitT && avail >= tTotal && (uint8_t)p[tTotal - 1] == spec.endFlag) {
-        *outMode = FrameLenMode::Total; *outTotal = tTotal; return Probe::Ok;
-    }
-    if (fitP && avail >= tPayload && (uint8_t)p[tPayload - 1] == spec.endFlag) {
-        *outMode = FrameLenMode::Payload; *outTotal = tPayload; return Probe::Ok;
-    }
-
-    size_t need = 0;
-    if (fitT) need = std::max(need, tTotal);
-    if (fitP) need = std::max(need, tPayload);
-    if (need == 0) return Probe::Corrupt;
-    if (avail < need) return Probe::NeedMore;
-    return Probe::Corrupt;
-}
-
 } // namespace
 
 // ============================================================================
-// decodeFields — payload bytes -> one row (shared by raw_data and modbus)
+// decodePayload — one record's payload bytes -> one row
+// (shared by the custom_data and modbus paths)
 // ============================================================================
-namespace {
-
-bool decodeFields(const FrameSpec& spec, bool be, const uint8_t* payload,
-                  size_t payloadLen, Cell* row) {
+bool FrameCodec::decodePayload(const FrameSpec& spec, bool be, const char* payloadBase,
+                               size_t payloadLen, Cell* row) {
+    const uint8_t* payload = (const uint8_t*)payloadBase;
     const int nFields = (int)spec.fields.size();
     if (nFields == 0) return false;
     if ((size_t)spec.payloadMin > payloadLen) return false;   // fields do not fit
@@ -160,17 +105,17 @@ bool decodeFields(const FrameSpec& spec, bool be, const uint8_t* payload,
         const uint8_t* p = payload + f.byteOffset;
         switch (f.kind) {
         case FieldKind::Float32:
-            row[i].v.d = loadFloat32(p, be) * f.factor;
+            row[i].v.d = loadFloat32(p, be);
             break;
         case FieldKind::Float64:
-            row[i].v.d = loadFloat64(p, be) * f.factor;
+            row[i].v.d = loadFloat64(p, be);
             break;
         case FieldKind::Bool:
             row[i].v.i = (loadRaw(p, 1, be) != 0) ? 1 : 0;
             break;
         default: {
-            int64_t raw = decodeInt(p, f, be);
-            if (f.asDouble) row[i].v.d = (double)raw * f.factor;
+            const int64_t raw = decodeInt(p, f, be);
+            if (f.asDouble) row[i].v.d = (double)raw;
             else            row[i].v.i = raw;
             break;
         }
@@ -179,115 +124,100 @@ bool decodeFields(const FrameSpec& spec, bool be, const uint8_t* payload,
     return true;
 }
 
-} // namespace
-
 // ============================================================================
-// decodeFrame — one raw_data frame -> one row
+// feed — custom_data stream slicing
+//
+// One frame = custom header + payload + optional delimiter byte. The header
+// carries the payload length and the frame type, so NO runtime probing is
+// needed; the frame type picks the device (status table or one event table)
+// inside the peer group and therefore the field layout to decode with.
 // ============================================================================
-bool FrameCodec::decodeFrame(const DeviceDesc& dev, const char* frameBase,
-                             size_t frameBytes, Cell* row) {
-    const FrameSpec& spec = dev.spec;
-    const size_t tail = spec.endFlag ? 1 : 0;
-    if (frameBytes < kHeaderSize + tail) return false;
-
-    const uint8_t* payload = (const uint8_t*)frameBase + kHeaderSize;
-    const size_t payloadLen = frameBytes - kHeaderSize - tail;
-    return decodeFields(spec, dev.bigEndian(), payload, payloadLen, row);
-}
-
-// ============================================================================
-// feed — stream slicing
-// ============================================================================
-int FrameCodec::feed(const DeviceDesc& dev, DeviceStream& st,
-                     const char* data, size_t len, int64_t recvMs, RowBatch& batch) {
-    const FrameSpec& spec = dev.spec;
+int FrameCodec::feed(const DeviceGroup& group, DeviceStream& st,
+                     const char* data, size_t len, int64_t recvMs, const RowSink& sink) {
     st.bytesIn += len;
-
-    if (spec.fields.empty()) {
-        // No usable field layout: frames cannot become rows. Drop the bytes;
-        // the warning was already emitted when the configuration was loaded.
-        return 0;
-    }
-
     st.buf.insert(st.buf.end(), data, data + len);
-    if ((int)st.rowScratch.size() < dev.fieldCount())
-        st.rowScratch.resize((size_t)dev.fieldCount());
-
-    const bool be = dev.bigEndian();
-    const size_t tail = spec.endFlag ? 1 : 0;
 
     int rows = 0;
     size_t pos = 0;
     const size_t n = st.buf.size();
     const uint8_t* base = (const uint8_t*)st.buf.data();
 
-    while (true) {
-        // ── 1. re-sync to the start flag ──
-        if (spec.startFlag != 0) {
-            size_t p = pos;
-            while (p < n && base[p] != spec.startFlag) ++p;
-            if (p != pos) { st.resyncs += (p - pos); pos = p; }
-        }
-        if (n - pos < kHeaderSize) break;
-
+    while (n - pos >= kHeaderSize) {
         const uint8_t* h = base + pos;
+        const uint8_t frameType = h[0];
+        const uint8_t flag      = h[1];
+        const size_t  frameLen  = (size_t)h[2] | ((size_t)h[3] << 8);
+        // h[4] / h[5] = sequenceId: reserved for future use, not validated.
 
-        // ── 2. frame length: probe once, then use the resolved mode ──
-        size_t total = 0;
-        if (!st.resolved) {
-            FrameLenMode chosen = FrameLenMode::Auto;
-            size_t chosenTotal = 0;
-            Probe pr = probeFrame(dev, h, n - pos, &chosen, &chosenTotal);
-            if (pr == Probe::NeedMore) break;
-            if (pr == Probe::Corrupt) { ++pos; ++st.resyncs; continue; }
-            st.lenMode = chosen;
-            st.resolved = true;
-            st.probeFlips = 0;
+        // ── 1. frame type -> device (status or event measurement set) ──
+        const DeviceDesc* dev = group.byFrameType((int)frameType);
+        if (!dev) {
+            ++st.unknownType;
+            ++pos; ++st.resyncs;
+            continue;
         }
+        const FrameSpec& spec = dev->spec;
+        if (spec.fields.empty()) { ++pos; ++st.resyncs; continue; }
 
-        {
-            int lenVal = be ? (((int)h[2] << 8) | h[3]) : (h[2] | ((int)h[3] << 8));
-            if (lenVal <= 0) lenVal = spec.frameLen;
-            if (lenVal <= 0) { ++pos; ++st.resyncs; continue; }
-
-            total = (st.lenMode == FrameLenMode::Total)
-                        ? (size_t)lenVal
-                        : (kHeaderSize + (size_t)lenVal + tail);
-            if (total > kMaxFrame || total < kHeaderSize + tail) {
-                ++pos; ++st.resyncs; continue;
-            }
-        }
-
-        if (n - pos < total) break;   // wait for more bytes
-
-        // ── 3. decode one frame ──
-        Cell* row = st.rowScratch.data();
-        if (!decodeFrame(dev, (const char*)h, total, row)) {
-            ++st.badFrames;
-            // The resolved mode may be wrong (frame_len semantics differ from
-            // the probe): flip once and keep going from this position.
-            if (st.probeFlips < 1 && st.lenMode != FrameLenMode::Auto) {
-                st.lenMode = (st.lenMode == FrameLenMode::Total)
-                                 ? FrameLenMode::Payload : FrameLenMode::Total;
-                ++st.probeFlips;
-            }
+        // ── 2. delimiter bytes — EVENT frames only ──
+        // data_header_table.start_flag / end_flag describe the event burst
+        // boundaries: that is how a DIFFERENT parsing rule (logically another
+        // device, with its own EtherDB table) is recognized inside one TCP
+        // stream. Status frames carry no delimiter, so the byte is ignored.
+        // start_flag and end_flag are normally the same byte; when they differ
+        // the leading and trailing delimiters are taken separately.
+        const uint8_t leadFlag  = dev->isEvent ? spec.startFlag : 0;
+        const uint8_t trailFlag = dev->isEvent ? spec.endFlag   : 0;
+        if (leadFlag != 0 && flag != leadFlag) {
+            ++st.flagMiss;
             ++pos; ++st.resyncs;
             continue;
         }
 
-        // End flag is informational once the mode is fixed (auto probing used
-        // it to pick the mode); a mismatch does not invalidate the frame.
-        if (spec.endFlag != 0 && base[pos + total - 1] != spec.endFlag)
-            ++st.endFlagMiss;
+        // ── 3. payload length: header value, 0 = one configured record ──
+        size_t payloadBytes = frameLen;
+        if (payloadBytes == 0)
+            payloadBytes = (size_t)(spec.frameLen > 0 ? spec.frameLen : 0);
+        if (payloadBytes == 0 || payloadBytes < (size_t)spec.payloadMin) {
+            ++pos; ++st.resyncs;
+            continue;
+        }
 
-        st.probeFlips = 0;
-        ++st.frames;
-        batch.pushRow(recvMs, row);
-        ++rows;
-        pos += total;
+        const size_t tail       = trailFlag ? 1 : 0;
+        const size_t frameBytes = kHeaderSize + payloadBytes + tail;
+        if (frameBytes > kMaxFrame) { ++pos; ++st.resyncs; continue; }
+        if (n - pos < frameBytes) break;   // wait for more bytes
+
+        // The trailing delimiter is informational once the length framed it.
+        if (tail && base[pos + frameBytes - 1] != trailFlag) ++st.flagMiss;
+
+        // ── 4. records: one header can carry several records ──
+        size_t recordBytes = (spec.frameLen > 0) ? (size_t)spec.frameLen : payloadBytes;
+        size_t records = 1;
+        if (recordBytes > 0 && payloadBytes >= recordBytes &&
+            payloadBytes % recordBytes == 0) {
+            records = payloadBytes / recordBytes;
+        }
+
+        if (st.rowScratch.size() < (size_t)dev->fieldCount())
+            st.rowScratch.resize((size_t)dev->fieldCount());
+
+        bool ok = true;
+        for (size_t k = 0; k < records; ++k) {
+            const char* p = (const char*)(h + kHeaderSize) + k * recordBytes;
+            if (!decodePayload(spec, dev->bigEndian(), p, recordBytes,
+                               st.rowScratch.data())) {
+                ok = false;
+                break;
+            }
+            sink.push(dev, recvMs, st.rowScratch.data());
+            ++rows;
+        }
+        if (ok) ++st.frames; else ++st.badFrames;
+        pos += frameBytes;
     }
 
-    // ── 4. compact the stream buffer ──
+    // ── 5. compact the stream buffer ──
     if (pos > 0)
         st.buf.erase(st.buf.begin(), st.buf.begin() + (std::ptrdiff_t)pos);
     if (st.buf.size() > 256 * 1024) {   // mis-sync / runaway peer: keep the tail
@@ -310,7 +240,7 @@ int FrameCodec::feed(const DeviceDesc& dev, DeviceStream& st,
 // fixed length  header + max(field byteOffset+size).
 // ============================================================================
 int FrameCodec::feedModbus(const DeviceDesc& dev, DeviceStream& st,
-                           const char* data, size_t len, int64_t recvMs, RowBatch& batch) {
+                           const char* data, size_t len, int64_t recvMs, const RowSink& sink) {
     const FrameSpec& spec = dev.spec;
     st.bytesIn += len;
 
@@ -376,11 +306,12 @@ int FrameCodec::feedModbus(const DeviceDesc& dev, DeviceStream& st,
             const size_t payloadLen = total - (size_t)hdr;
             if (payloadLen < payloadNeed) { ++pos; ++st.resyncs; continue; }
 
-            if (!decodeFields(spec, be, base + pos + hdr, payloadLen, st.rowScratch.data())) {
+            if (!decodePayload(spec, be, (const char*)base + pos + hdr, payloadLen,
+                               st.rowScratch.data())) {
                 ++st.badFrames; ++pos; ++st.resyncs; continue;
             }
             ++st.frames;
-            batch.pushRow(recvMs, st.rowScratch.data());
+            sink.push(&dev, recvMs, st.rowScratch.data());
             ++rows;
             pos += total;
         } else {
@@ -389,11 +320,12 @@ int FrameCodec::feedModbus(const DeviceDesc& dev, DeviceStream& st,
             if (total > kMaxFrame) return rows;   // configuration problem
             if (n - pos < total) break;
 
-            if (!decodeFields(spec, be, base + pos + hdr, payloadNeed, st.rowScratch.data())) {
+            if (!decodePayload(spec, be, (const char*)base + pos + hdr, payloadNeed,
+                               st.rowScratch.data())) {
                 ++st.badFrames; ++pos; ++st.resyncs; continue;
             }
             ++st.frames;
-            batch.pushRow(recvMs, st.rowScratch.data());
+            sink.push(&dev, recvMs, st.rowScratch.data());
             ++rows;
             pos += total;
         }

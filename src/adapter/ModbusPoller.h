@@ -25,7 +25,7 @@
 // (IngestServer) and is parsed by ParserWorker.
 //
 // Request layout (see etherAdapter.txt design):
-//   [transId 2B][0x0000 2B][length=6 2B][unit 1B][funCode 1B][data 2B][readCount 2B]
+//   [transId 2B][0x0000 2B][length=6 2B][slave_addr 1B][fun_code 1B][start_addr 2B][addr_num 2B]
 // transId cycles 1..0xFF per device (0xFF resets to 1 before use).
 //
 // All request fields come from data_header_table (unit / fun_code / data /

@@ -229,7 +229,7 @@ bool HttpIngest::start(std::string* err) {
     for (uint16_t p : _db.listenPorts()) {
         if (p == port) {
             EA_LOG_WARN << "http ingest: port " << port
-                        << " is also a raw_data/modbus listen port — the HTTP server may fail to bind";
+                        << " is also a custom_data/modbus listen port — the HTTP server may fail to bind";
             break;
         }
     }

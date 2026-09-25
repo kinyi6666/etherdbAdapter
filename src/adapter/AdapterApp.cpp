@@ -154,7 +154,7 @@ void AdapterApp::logConfigSummary() const {
              << " db=" << _cfg.etherdb.db
              << " batchRows=" << _cfg.etherdb.batchRows
              << " flush=" << _cfg.etherdb.flushIntervalMs << "ms";
-    EA_LOG_INFO << "  parse     : frameLenMode=" << _cfg.parse.frameLenMode;
+    EA_LOG_INFO << "  parse     : custom_data header 6B (frameType/flag/frameLen/sequenceId)";
     EA_LOG_INFO << "  http      : port=" << (_cfg.http.port ? std::to_string(_cfg.http.port)
                                                           : std::string("(from device_table)"));
     EA_LOG_INFO << "  modbus    : poll every " << _cfg.modbus.pollIntervalMs << " ms";
@@ -165,7 +165,7 @@ void AdapterApp::logConfigSummary() const {
 }
 
 void AdapterApp::statsLoop() {
-    uint64_t pc = 0, pb = 0, pf = 0, pr = 0, pw = 0, pwe = 0, pmb = 0, pht = 0;
+    uint64_t pc = 0, pb = 0, pf = 0, pr = 0, pw = 0, pwe = 0, pmb = 0, pht = 0, pev = 0;
 
     while (_statsRunning.load(std::memory_order_relaxed)) {
         for (int i = 0; i < 50 && _statsRunning.load(std::memory_order_relaxed); ++i)
@@ -181,15 +181,17 @@ void AdapterApp::statsLoop() {
         const uint64_t un = _stats->unmatched.load(std::memory_order_relaxed);
         const uint64_t mb = _stats->modbusRequests.load(std::memory_order_relaxed);
         const uint64_t ht = _stats->httpRequests.load(std::memory_order_relaxed);
+        const uint64_t ev = _stats->eventRows.load(std::memory_order_relaxed);
 
         EA_LOG_INFO << "[stats] chunks +" << (c - pc)
                  << " (" << (b - pb) / 1024 << " KB) frames +" << (f - pf)
-                 << " rows +" << (r - pr) << " written +" << (w - pw)
+                 << " rows +" << (r - pr) << " (event +" << (ev - pev) << ")"
+                 << " written +" << (w - pw)
                  << " modbus +" << (mb - pmb) << " http +" << (ht - pht)
                  << " drop " << un << " err " << we
                  << " | queue ingest " << _ingestQueue->size_approx()
                  << " write " << _writeQueue->size_approx();
-        pc = c; pb = b; pf = f; pr = r; pw = w; pwe = we; pmb = mb; pht = ht;
+        pc = c; pb = b; pf = f; pr = r; pw = w; pwe = we; pmb = mb; pht = ht; pev = ev;
     }
     (void)pwe;
 }
@@ -238,7 +240,6 @@ int AdapterApp::run(const std::string& cfgFile) {
 
     // ── 5. parser thread (single thread for ALL protocol parsing) ──
     _parser.reset(new ParserWorker(_ingestQueue.get(), _writeQueue.get(), _publish.get(),
-                                   parseFrameLenMode(_cfg.parse.frameLenMode),
                                    _cfg.etherdb.batchRows, _cfg.etherdb.flushIntervalMs,
                                    _stats.get()));
     _parser->start();
@@ -250,7 +251,7 @@ int AdapterApp::run(const std::string& cfgFile) {
     _mqtt.reset(new MqttIngest(_cfg));
     _mqtt->start(&err);
 
-    // ── 7. listeners: unified TCP ingest (raw_data/modbus) + ONE http server ──
+    // ── 7. listeners: unified TCP ingest (custom_data/modbus) + ONE http server ──
     _server.reset(new IngestServer(&_loop, *_configDb, _cfg.server,
                                    _ingestQueue.get(), _stats.get()));
     if (!_server->start(&err)) {
@@ -295,7 +296,8 @@ int AdapterApp::run(const std::string& cfgFile) {
 
     EA_LOG_INFO << "etherAdapter stopped: "
              << _stats->frames.load() << " frame(s), "
-             << _stats->rowsParsed.load() << " row(s) parsed, "
+             << _stats->rowsParsed.load() << " row(s) parsed ("
+             << _stats->eventRows.load() << " event), "
              << _stats->rowsWritten.load() << " row(s) written, "
              << _stats->modbusRequests.load() << " modbus request(s), "
              << _stats->httpRequests.load() << " http request(s), "

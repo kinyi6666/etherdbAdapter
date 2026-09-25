@@ -45,13 +45,12 @@
 // ---------------------------------------------------------------------------
 static const char* kSchema =
     "CREATE TABLE IF NOT EXISTS device_table ("
-    "  channelID         INTEGER PRIMARY KEY,"
-    "  device_id         TEXT,"
+    "  device_id         TEXT PRIMARY KEY,"
     "  device_name       TEXT,"
     "  device_ip         TEXT NOT NULL,"
-    "  device_port       INTEGER,"          // device source/request port (empty for http)
+    "  device_port       INTEGER,"
     "  conn_proto        TEXT,"
-    "  local_server_port INTEGER NOT NULL,"
+    "  local_server_port INTEGER,"
     "  data_proto_id     INTEGER NOT NULL,"
     "  device_type       TEXT,"
     "  endian            INTEGER DEFAULT 0"
@@ -63,11 +62,10 @@ static const char* kSchema =
     "  start_flag    TEXT,"          // may be '0x01'
     "  end_flag      TEXT,"
     "  endian        INTEGER DEFAULT 0,"
-    "  reserve       TEXT,"
-    "  unit          INTEGER,"        // modbus register-read request
+    "  slave_addr    INTEGER,"        // modbus register-read request
     "  fun_code      INTEGER,"
-    "  data          INTEGER,"
-    "  read_count    INTEGER"
+    "  start_addr    INTEGER,"
+    "  addr_num      INTEGER"
     ");"
     "CREATE TABLE IF NOT EXISTS data_proto_table ("
     "  id            INTEGER PRIMARY KEY,"
@@ -221,19 +219,24 @@ static bool importDeviceTable(sqlite3* db, const std::string& csv, ImportStats* 
 
     for (size_t i = 0; i < lines.size(); ++i) {
         auto f = splitCsvLine(lines[i]);
-        if (f.size() < 9) continue;
-        // Skip header + annotation rows (no numeric channelID)
-        if (!isNumeric(f[0])) { if (i > 0) ++st->skipped; continue; }
+        if (f.size() < 7) continue;
+        // device_id is the key: skip the header row and annotation rows.
+        const std::string& did = f[0];
+        if (did.empty() || did == "device_id") { if (i > 0) ++st->skipped; continue; }
 
         std::string sql =
             "INSERT OR REPLACE INTO device_table"
-            "(channelID, device_id, device_name, device_ip, device_port, conn_proto,"
+            "(device_id, device_name, device_ip, device_port, conn_proto,"
             " local_server_port, data_proto_id, device_type, endian) VALUES(" +
-            integerValue(f[0]) + "," + colValue(toUtf8(f[1])) + "," + colValue(toUtf8(f[2])) + "," +
-            colValue(toUtf8(f[3])) + "," + integerValue(f[4]) + "," + colValue(toUtf8(f[5])) + "," +
-            integerValue(f[6]) + "," + integerValue(f[7]) + "," +
-            colValue(toUtf8(f.size() > 8 ? f[8] : "")) + "," +
-            integerValue(f.size() > 9 ? f[9] : "") + ")";
+            colValue(toUtf8(did)) + "," +
+            colValue(toUtf8(f.size() > 1 ? f[1] : "")) + "," +
+            colValue(toUtf8(f.size() > 2 ? f[2] : "")) + "," +
+            integerValue(f.size() > 3 ? f[3] : "") + "," +
+            colValue(toUtf8(f.size() > 4 ? f[4] : "")) + "," +
+            integerValue(f.size() > 5 ? f[5] : "") + "," +
+            integerValue(f.size() > 6 ? f[6] : "") + "," +
+            colValue(toUtf8(f.size() > 7 ? f[7] : "")) + "," +
+            integerValue(f.size() > 8 ? f[8] : "") + ")";
         if (!execSql(db, sql, err)) return false;
         ++st->rows;
     }
@@ -251,17 +254,16 @@ static bool importHeaderTable(sqlite3* db, const std::string& csv, ImportStats* 
 
         std::string sql =
             "INSERT OR REPLACE INTO data_header_table"
-            "(data_proto_id, frame_type, frame_len, start_flag, end_flag, endian, reserve,"
-            " unit, fun_code, data, read_count) VALUES(" +
+            "(data_proto_id, frame_type, frame_len, start_flag, end_flag, endian,"
+            " slave_addr, fun_code, start_addr, addr_num) VALUES(" +
             integerValue(f[0]) + "," + integerValue(f.size() > 1 ? f[1] : "") + "," +
             integerValue(f.size() > 2 ? f[2] : "") + "," +
             colValue(f.size() > 3 ? f[3] : "") + "," + colValue(f.size() > 4 ? f[4] : "") + "," +
             integerValue(f.size() > 5 ? f[5] : "") + "," +
-            colValue(toUtf8(f.size() > 6 ? f[6] : "")) + "," +
+            integerValue(f.size() > 6 ? f[6] : "") + "," +
             integerValue(f.size() > 7 ? f[7] : "") + "," +
             integerValue(f.size() > 8 ? f[8] : "") + "," +
-            integerValue(f.size() > 9 ? f[9] : "") + "," +
-            integerValue(f.size() > 10 ? f[10] : "") + ")";
+            integerValue(f.size() > 9 ? f[9] : "") + ")";
         if (!execSql(db, sql, err)) return false;
         ++st->rows;
     }

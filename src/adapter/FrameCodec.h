@@ -15,16 +15,30 @@
 // ============================================================================
 // etherAdapter — frame codec: stream slicing + field decoding
 //
-// A raw_data frame is laid out as (see data_header_table):
+// custom_data frames carry the 6-byte custom header (see customHeader below):
 //
-//   [start_flag 1B][frame_type 1B][frame_len 2B][payload ...][end_flag 1B]
+//   [frameType 1B][flag 1B][frameLen 2B][sequenceId 2B][payload ...][flag 1B]
 //
-// `frame_len` may either count the whole frame ("total") or only the payload
-// ("payload"); the auto mode probes each protocol once at runtime using the
-// end flag AND the configured field extents (frame specs carry payloadMin).
+//   frameType   selects the measurement set of the frame: the frame_type of the
+//               device_table row that owns the matching data_proto_id. Several
+//               rows may share one (ip, device_port) endpoint — the first is
+//               the periodic STATUS sampling, the others are EVENT streams with
+//               a different (usually smaller) point count or a higher rate.
+//               An event frame is logically ANOTHER device: it is parsed with
+//               its own rules and written to its own EtherDB "event table".
+//   flag        frame delimiter byte, meaningful for EVENT frames only: it is
+//               what identifies the event parsing rule inside the shared TCP
+//               stream (data_header_table.start_flag / end_flag; both normally
+//               hold the same byte, but differing values are honoured as the
+//               leading / trailing delimiter). Status frames ignore it.
+//   frameLen    payload bytes carried by this frame, little endian. The payload
+//               holds frameLen / data_header_table.frame_len records, so several
+//               records can share one header (0 = exactly one record).
+//   sequenceId  reserved for future use: read but never validated or decoded.
 //
 // Field decoding is fully table-driven (byte_offset / bit_offset / bit_len /
-// type / factor), little- or big-endian per device.
+// field_type), little- or big-endian per device. data_proto_table.factor is
+// ignored — the database stores raw values.
 // ============================================================================
 #ifndef ETHERADAPTER_FRAMECODEC_H
 #define ETHERADAPTER_FRAMECODEC_H
@@ -39,39 +53,39 @@
 
 namespace EtherAdapter {
 
-// How data_header_table.frame_len is interpreted ([parse].frameLenMode).
-enum class FrameLenMode : uint8_t {
-    Auto = 0,   // probe at runtime (default)
-    Total,      // frame_len counts the whole frame
-    Payload,    // frame_len counts the payload only
+// Wire layout of the custom_data header (little endian on the wire).
+#pragma pack(push, 1)
+struct customHeader
+{
+    unsigned char frameType;  // measurement set selector (data_header_table.frame_type)
+    unsigned char startFlag;  // frame delimiter: start_flag == end_flag
+    uint16_t frameLen;        // payload bytes; records = frameLen / data_header_table.frame_len
+    uint16_t sequenceId;      // reserved — not validated, not decoded
 };
-
-FrameLenMode parseFrameLenMode(const std::string& text);
+#pragma pack(pop)
 
 // Per-device stream slicing state, owned by the parser thread.
 struct DeviceStream {
-    FrameLenMode lenMode  = FrameLenMode::Auto;
-    bool         resolved = false;   // lenMode probed and fixed
     std::vector<char> buf;           // pending (unparsed) bytes
-    std::vector<Cell> rowScratch;    // decode scratch, one row
-
-    int probeFlips = 0;              // mode flips after a bad decode
+    std::vector<Cell> rowScratch;    // decode scratch, one record
 
     // statistics
     uint64_t frames      = 0;
     uint64_t bytesIn     = 0;
     uint64_t resyncs     = 0;   // bytes dropped while re-synchronizing
     uint64_t badFrames   = 0;
-    uint64_t endFlagMiss = 0;   // frames whose tail byte != end_flag
+    uint64_t flagMiss    = 0;   // frames whose delimiter byte did not match
+    uint64_t unknownType = 0;   // frames whose frame type matches no device
+    uint64_t unknownTypeLogged = 0;   // already reported to the log
 };
 
 class FrameCodec {
 public:
-    // Feed received bytes into the per-device stream and append every complete
-    // frame as one row to `batch` (batch.dev must equal &dev, ts = recvMs).
-    // Returns the number of rows appended.
-    static int feed(const DeviceDesc& dev, DeviceStream& st,
-                    const char* data, size_t len, int64_t recvMs, RowBatch& batch);
+    // Feed received bytes into the per-endpoint stream and append every decoded
+    // row to `sink` (the row's device follows from the frame type). Frames
+    // carry 1..N records; each record becomes one row. Returns rows appended.
+    static int feed(const DeviceGroup& group, DeviceStream& st,
+                    const char* data, size_t len, int64_t recvMs, const RowSink& sink);
 
     // Feed received bytes for a MODBUS device (register-read responses arrive
     // on the unified ingest listener). The response header length comes from
@@ -79,15 +93,15 @@ public:
     // byteCount, 0 = raw register bytes. Registers decode big-endian unless
     // the endian configuration says little. Returns rows appended.
     static int feedModbus(const DeviceDesc& dev, DeviceStream& st,
-                          const char* data, size_t len, int64_t recvMs, RowBatch& batch);
+                          const char* data, size_t len, int64_t recvMs, const RowSink& sink);
 
-    // Decode the payload of one frame into `row` (must hold fieldCount cells).
-    // `frameBytes` is the total frame size including header and end flag.
-    // Returns false when the frame is malformed (field outside the payload...).
-    static bool decodeFrame(const DeviceDesc& dev, const char* frameBase,
-                            size_t frameBytes, Cell* row);
+    // Decode ONE record's payload into `row` (must hold spec.fields.size()
+    // cells). Returns false when the record is malformed (field outside the
+    // payload). Shared by the custom_data and modbus paths.
+    static bool decodePayload(const FrameSpec& spec, bool be, const char* payload,
+                              size_t payloadLen, Cell* row);
 
-    static const size_t kHeaderSize = 4;   // start_flag + frame_type + len(2)
+    static const size_t kHeaderSize = sizeof(customHeader);   // 6 bytes
     static const size_t kMaxFrame   = 64 * 1024;
 };
 

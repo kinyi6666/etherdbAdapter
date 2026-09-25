@@ -67,7 +67,7 @@ bool EtherDBWriter::start(std::string* err) {
     int sqlDevices = 0;
     for (const DeviceDesc& dev : _db.devices()) {
         if (dev.spec.fields.empty()) continue;
-        if (dev.connProto != CONN_RAW_DATA && dev.connProto != CONN_MODBUS &&
+        if (dev.connProto != CONN_CUSTOM_DATA && dev.connProto != CONN_MODBUS &&
             dev.connProto != CONN_HTTP) {
             continue;   // mqtt etc. — not served yet
         }

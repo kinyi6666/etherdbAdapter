@@ -63,17 +63,6 @@ struct EtherDBConfig {
 };
 
 // ---------------------------------------------------------------------------
-// [parse]
-// ---------------------------------------------------------------------------
-struct ParseConfig {
-    // How data_header_table.frame_len is interpreted:
-    //   "auto"    - probe at runtime per protocol (default)
-    //   "total"   - frame_len counts the whole frame including flags
-    //   "payload" - frame_len counts the payload only (flags excluded)
-    std::string frameLenMode = "auto";
-};
-
-// ---------------------------------------------------------------------------
 // [http] — HTTP ingest (single server; slow data, INSERT-SQL write path)
 // ---------------------------------------------------------------------------
 struct HttpConfig {
@@ -115,7 +104,6 @@ struct AdapterConfig {
     ServerConfig  server;
     SqliteConfig  sqlite;
     EtherDBConfig etherdb;
-    ParseConfig   parse;
     HttpConfig    http;
     ModbusConfig  modbus;
     LogConfig     log;

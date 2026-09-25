@@ -80,7 +80,7 @@ bool IngestServer::start(std::string* err) {
 
 void IngestServer::stop() {
     _servers.clear();
-    _devByConn.clear();
+    _groupByConn.clear();
 }
 
 void IngestServer::onConnection(const TcpConnectionPtr& conn) {
@@ -88,23 +88,25 @@ void IngestServer::onConnection(const TcpConnectionPtr& conn) {
         const std::string ip = conn->peerAddress().toIp();
         const uint16_t port = conn->peerAddress().toPort();
 
-        const DeviceDesc* dev = _db.matchDevice(ip, port);
-        _devByConn[conn.get()] = dev;
+        const DeviceGroup* group = _db.matchGroup(ip, port);
+        _groupByConn[conn.get()] = group;
         _stats->connsOpened.fetch_add(1, std::memory_order_relaxed);
 
-        if (dev) {
+        if (group && group->primary()) {
+            const DeviceDesc* dev = group->primary();
             EA_LOG_INFO << "device connected: " << dev->deviceId
-                     << " (channel " << dev->channelId << ", proto " << dev->connProto
-                     << ") from " << ip << ":" << (unsigned)port;
+                     << " (proto " << dev->connProto << ", " << group->members.size()
+                     << " measurement set(s)) from " << ip << ":" << (unsigned)port;
         } else {
             EA_LOG_WARN << "unknown peer connected: " << ip << ":" << (unsigned)port
                      << " (no device_table row matches ip:port)";
         }
     } else {
-        auto it = _devByConn.find(conn.get());
-        if (it != _devByConn.end()) {
-            if (it->second) EA_LOG_INFO << "device disconnected: " << it->second->deviceId;
-            _devByConn.erase(it);
+        auto it = _groupByConn.find(conn.get());
+        if (it != _groupByConn.end()) {
+            if (it->second && it->second->primary())
+                EA_LOG_INFO << "device disconnected: " << it->second->primary()->deviceId;
+            _groupByConn.erase(it);
         }
     }
 }
@@ -115,17 +117,18 @@ void IngestServer::onMessage(const TcpConnectionPtr& conn, Buffer* buf, Timestam
 
     _stats->bytesIn.fetch_add(len, std::memory_order_relaxed);
 
-    const DeviceDesc* dev = nullptr;
-    auto it = _devByConn.find(conn.get());
-    if (it != _devByConn.end()) dev = it->second;
+    const DeviceGroup* group = nullptr;
+    auto it = _groupByConn.find(conn.get());
+    if (it != _groupByConn.end()) group = it->second;
 
-    if (!dev) {   // lazy re-match (peer port may not have been known at connect time)
-        dev = _db.matchDevice(conn->peerAddress().toIp(), conn->peerAddress().toPort());
-        if (dev) _devByConn[conn.get()] = dev;
+    if (!group) {   // lazy re-match (peer port may not have been known at connect time)
+        group = _db.matchGroup(conn->peerAddress().toIp(), conn->peerAddress().toPort());
+        if (group) _groupByConn[conn.get()] = group;
     }
 
-const bool ingestable = dev &&
-        (dev->connProto == CONN_RAW_DATA || dev->connProto == CONN_MODBUS) &&
+    const DeviceDesc* dev = group ? group->primary() : nullptr;
+    const bool ingestable = dev &&
+        (dev->connProto == CONN_CUSTOM_DATA || dev->connProto == CONN_MODBUS) &&
         !dev->spec.fields.empty();
     if (!ingestable) {
         const uint64_t n = _stats->unmatched.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -149,7 +152,7 @@ const bool ingestable = dev &&
     }
 
     RawChunk chunk;
-    chunk.dev    = dev;
+    chunk.group  = group;
     chunk.recvMs = t.microSecondsSinceEpoch() / 1000;
     chunk.data.assign(buf->peek(), buf->peek() + len);
     buf->retrieveAll();

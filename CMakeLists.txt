@@ -2,7 +2,7 @@
 # etherAdapter — device sampling data adapter for EtherDB
 #
 #   device --> muduo (TCP ingest) --> moodycamel queue --> parser thread
-#          --> EtherDB write queue --> EtherDB   (raw_data protocol path)
+#          --> EtherDB write queue --> EtherDB   (custom_data protocol path)
 #          --> publish queue        --> ZMQ PUB (reserved, stubbed today)
 #
 # Build (Windows / VS2022):

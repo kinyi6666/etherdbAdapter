@@ -155,7 +155,7 @@ struct ModbusPoller::Session {
 
 // ---------------------------------------------------------------------------
 // Request builder: 12 bytes, big endian, transId cycling 1..0xFE
-//   [transId 2][0x0000 2][length=6 2][unit 1][funCode 1][data 2][readCount 2]
+//   [transId 2][0x0000 2][length=6 2][slave_addr 1][fun_code 1][start_addr 2][addr_num 2]
 // ---------------------------------------------------------------------------
 static void buildRequest(uint8_t out[12], uint16_t& tid, const FrameSpec& spec) {
     if (tid == 0xFF) tid = 1;
@@ -166,12 +166,12 @@ static void buildRequest(uint8_t out[12], uint16_t& tid, const FrameSpec& spec) 
     out[3]  = 0x00;                                    // protocol id
     out[4]  = 0x00;
     out[5]  = 0x06;                                    // length (fixed, see design)
-    out[6]  = (uint8_t)(spec.unit & 0xFF);
+    out[6]  = (uint8_t)(spec.slaveAddr & 0xFF);
     out[7]  = (uint8_t)(spec.funCode & 0xFF);
-    out[8]  = (uint8_t)((spec.dataAddr >> 8) & 0xFF);
-    out[9]  = (uint8_t)(spec.dataAddr & 0xFF);
-    out[10] = (uint8_t)((spec.readCount >> 8) & 0xFF);
-    out[11] = (uint8_t)(spec.readCount & 0xFF);
+    out[8]  = (uint8_t)((spec.startAddr >> 8) & 0xFF);
+    out[9]  = (uint8_t)(spec.startAddr & 0xFF);
+    out[10] = (uint8_t)((spec.addrNum >> 8) & 0xFF);
+    out[11] = (uint8_t)(spec.addrNum & 0xFF);
 }
 
 ModbusPoller::ModbusPoller(const AdapterConfig& cfg, const ConfigDB& db, AdapterStats* stats)
@@ -188,10 +188,10 @@ void ModbusPoller::start() {
         if (d.connProto != CONN_MODBUS) continue;
 
         if (!d.spec.hasModbusRequest()) {
-            EA_LOG_WARN << "modbus device " << d.deviceId << " (channel " << d.channelId
-                        << "): no register request configured — set unit/fun_code/data/"
-                        << "read_count in data_header_table for protocol " << d.dataProtoId
-                        << "; device skipped by the poller";
+            EA_LOG_WARN << "modbus device " << d.deviceId
+                        << ": no register request configured — set slave_addr/fun_code/"
+                        << "start_addr/addr_num in data_header_table for protocol "
+                        << d.dataProtoId << "; device skipped by the poller";
             continue;
         }
         if (d.spec.fields.empty()) {
