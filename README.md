@@ -48,9 +48,7 @@
 
 - 网络：复用 EtherDB 的 muduo 风格网络库（`src/net`）+ base 库（`src/base`），
   与 EtherDB 服务端同一套代码，Windows/Linux 均可构建。
-- 队列：moodycamel `BlockingConcurrentQueue`（`src/base/blockingconcurrentqueue.h`），
-  与 EtherDB 服务端同样的 traits（大块 + 块回收）。
-- 解析：**单线程**完成全部协议解析（完全按配置驱动，无硬编码协议）：
+- 队列：moodycamel `BlockingConcurrentQueue`（`src/base/blockingconcurrentqueue.h`）
   custom_data 帧与 modbus 响应都从统一监听端口进入解析线程。
 - 写入：custom_data/modbus 设备走 SDK 列绑定预编译语句
   （`EtDBStmt::bindParamBatch + execute`，最快路径）；http 慢速数据直接拼
@@ -124,6 +122,18 @@ etherAdapter/
   连接**同时上报状态采样和事件采样，并分别落入不同的 EtherDB 表。
   `local_server_port` 为适配器监听端口（custom_data/modbus 共用统一数据端口，
   http 用自己的独立端口，两类端口不能相同）；`data_proto_id` 关联另外两张表。
+  每行还可选填一个 `tag`：**它只影响建表**——值是一个或多个 `key=value`，用 `;` 或 `,` 分隔，
+  例如 `area=华东;model=T100`，建表时作为**表元数据**写入（不是列）：
+  ```sql
+  CREATE GROUP IF NOT EXISTS T100;                    -- 组名 = model 的值
+  CREATE TABLE IF NOT EXISTS dev_T100_001 (ts TIMESTAMP, item1 SMALLINT, ...)
+         IN T100 TAGS (area='华东', model='T100');
+  ```
+  **同 model 的表归入同一组**（`SHOW GROUPS` / `SHOW TABLES` 可见），tag 各不相同也没关系；
+  **表数量与表结构完全不变**。**`model` 是必须的：没填 `model`（或 `model` 值为空）按无标签处理，
+  建表与原来一字不差**（普通 `CREATE TABLE`）。
+  tag 的**键**和组名必须是标识符（字母/数字/`_`/`.`），**值**可任意（会自动加引号）；
+  键写错（不是 `key=value`）会记一条告警并跳过。
 - `data_header_table`：每个 `data_proto_id` 的帧格式 + 帧类型。
   - **custom_data**（自定义头 6 字节，小端）：
     `[frameType 1B][flag 1B][frameLen 2B][sequenceId 2B][payload ...][flag 1B?]`
@@ -211,8 +221,9 @@ build\bin\Release\etherAdapter.exe            :: 或 etherAdapter.exe -c <cfg>
 
 数据表结构：`<device_id>(ts TIMESTAMP, <字段1> <类型>, ...)`，
 `ts` = 适配器**接收时间**（毫秒）。状态数据与事件数据字段同构但分表
-（如 `dev_T100_001` / `dev_T100_001_E`）。运行统计每 5 秒记录到日志
-（`log\etherAdapter*.log`，含 event/modbus/http 计数）。
+（如 `dev_T100_001` / `dev_T100_001_E`）。若 `device_table.tag` 有值，建表时
+会把分组与标签写入**表元数据**（不是列），可用 `SHOW GROUPS` 查看。运行统计
+每 5 秒记录到日志（`log\etherAdapter*.log`，含 event/modbus/http 计数）。
 
 ## 6. 端到端测试
 

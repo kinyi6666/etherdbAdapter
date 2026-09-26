@@ -31,6 +31,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace EtherAdapter {
@@ -149,6 +150,15 @@ struct DeviceDesc {
     int         endian = 0;      // device-level override (0 = use header's)
 
     FrameSpec   spec;            // resolved protocol (by value)
+
+    // ── tag metadata (device_table.tag, parsed by ConfigDB::parseTags) ──
+    // The tag cell holds key=value pairs, e.g. "area=A1;model=T100". Every pair
+    // is added to the CREATE TABLE metadata as TAGS (name='value', ...); tags are
+    // never columns of the data table.
+    std::vector<std::pair<std::string, std::string>> tags;   // (name, value)
+    // Group the table joins (IN <group>), taken from the `model` tag: tables with
+    // the same model end up in one group. Empty = not grouped, no CREATE GROUP.
+    std::string groupName;
 
     // ── routing, filled in by ConfigDB::rebuildIndexes ──
     const DeviceGroup* group = nullptr;  // peers sharing (ip, device_port)

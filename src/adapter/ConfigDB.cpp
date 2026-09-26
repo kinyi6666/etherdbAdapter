@@ -22,6 +22,7 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 
@@ -42,6 +43,8 @@ enum BindType : int {
     kBindBigInt    = 5,
     kBindFloat     = 6,
     kBindDouble    = 7,
+    kBindBinary    = 8,
+    kBindNChar     = 9,   // fixed-size string slot (declared length)
 };
 
 // ============================================================================
@@ -205,6 +208,62 @@ void materializeField(FieldDesc& f, int index) {
         }
         break;
     }
+}
+
+// ----------------------------------------------------------------------------
+// device_table.tag parser (EtherDB tag.txt model)
+//
+// The tag cell holds one or more key=value pairs separated by ';' or ',':
+//   area=A1;model=T100   ->   TAGS (area='A1', model='T100')
+// Keys must be plain identifiers (the EtherDB parser accepts letters, digits,
+// '_' and '.'); values are free text and get quoted automatically. The value of
+// the "model" key also names the group a table joins (IN <group>), so tables
+// with the same model end up in one group.
+// ----------------------------------------------------------------------------
+static const char* const kGroupTagKey = "model";
+
+bool isTagIdentifier(const std::string& s) {
+    if (s.empty()) return false;
+    for (unsigned char c : s) {
+        if (!(std::isalnum(c) || c == '_' || c == '.')) return false;
+    }
+    return true;
+}
+
+// "area=A1; model=T100" -> {{area,A1},{model,T100}}; returns the number of
+// malformed items (they are skipped; the caller warns once per device).
+int parseTags(const std::string& text,
+              std::vector<std::pair<std::string, std::string>>* out) {
+    int bad = 0;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find_first_of(";,", pos);
+        if (end == std::string::npos) end = text.size();
+        std::string item = text.substr(pos, end - pos);
+        pos = end + 1;
+
+        const size_t b = item.find_first_not_of(" \t");
+        const size_t e = item.find_last_not_of(" \t");
+        if (b == std::string::npos) continue;                 // empty item
+        item = item.substr(b, e - b + 1);
+
+        const size_t eq = item.find('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 >= item.size()) { ++bad; continue; }
+
+        std::string k = item.substr(0, eq);
+        std::string v = item.substr(eq + 1);
+        const size_t kb = k.find_last_not_of(" \t");
+        if (kb != std::string::npos) k.resize(kb + 1);
+        const size_t vb = v.find_first_not_of(" \t");
+        if (vb == std::string::npos) { ++bad; continue; }
+        v.erase(0, vb);
+        const size_t ve = v.find_last_not_of(" \t");
+        if (ve != std::string::npos) v.resize(ve + 1);
+
+        if (!isTagIdentifier(k)) { ++bad; continue; }
+        out->push_back(std::make_pair(k, v));
+    }
+    return bad;
 }
 
 } // namespace
@@ -410,14 +469,28 @@ bool ConfigDB::loadFields(std::string* err) {
 bool ConfigDB::loadDevices(std::string* err) {
     // Row identity is device_id (the channelID column was dropped from the
     // plant export); rows without an ip or device_id are annotations and skipped.
-    const char* sql =
+    //
+    // `tag` is the optional tag-metadata cell (key=value pairs, see parseTags);
+    // a database without the column still loads (no tags) and keeps the plain
+    // CREATE TABLE flow.
+    const char* sqlNew =
+        "SELECT device_id, device_name, device_ip, device_port, "
+        "       conn_proto, local_server_port, data_proto_id, endian, tag "
+        "FROM device_table";
+    const char* sqlOld =
         "SELECT device_id, device_name, device_ip, device_port, "
         "       conn_proto, local_server_port, data_proto_id, endian "
         "FROM device_table";
+
     sqlite3_stmt* st = nullptr;
-    if (sqlite3_prepare_v2(_db, sql, -1, &st, nullptr) != SQLITE_OK) {
-        if (err) *err = std::string("device_table: ") + sqlite3_errmsg(_db);
-        return false;
+    bool withTag = (sqlite3_prepare_v2(_db, sqlNew, -1, &st, nullptr) == SQLITE_OK);
+    if (!withTag) {
+        if (sqlite3_prepare_v2(_db, sqlOld, -1, &st, nullptr) != SQLITE_OK) {
+            if (err) *err = std::string("device_table: ") + sqlite3_errmsg(_db);
+            return false;
+        }
+        EA_LOG_INFO << "device_table has no tag column — tables are created without "
+                    << "group/tag metadata (re-import the configuration to add it)";
     }
 
     int n = 0;
@@ -449,6 +522,53 @@ bool ConfigDB::loadDevices(std::string* err) {
         d.localServerPort = (uint16_t)readUInt32(st, 5, 0);
         d.dataProtoId     = (int)readInt64(st, 6, 0);
         d.endian          = (int)readInt64(st, 7, 0);
+
+        // ── tag cell -> table metadata; the model tag names the group ──
+        if (withTag) {
+            const std::string raw = readText(st, 8);
+            if (!raw.empty()) {
+                const int bad = parseTags(raw, &d.tags);
+                if (bad > 0) {
+                    EA_LOG_WARN << "device " << d.deviceId << ": tag '" << raw << "' has "
+                                << bad << " malformed item(s) (expected key=value, keys are "
+                                << "letters/digits/_/.) — they were skipped";
+                }
+
+                // The model tag is mandatory: without it the device counts as
+                // UNLABELLED and nothing at all is added to the CREATE TABLE
+                // (plain CREATE TABLE, exactly as before).
+                bool hasModel = false;
+                for (const auto& t : d.tags) {
+                    if (t.first == kGroupTagKey) hasModel = true;
+                }
+                if (!hasModel) {
+                    if (!d.tags.empty()) {
+                        EA_LOG_WARN << "device " << d.deviceId << ": tag '" << raw
+                                    << "' has no " << kGroupTagKey
+                                    << "=... — treated as NO tags (plain CREATE TABLE)";
+                    }
+                    d.tags.clear();
+                } else {
+                    for (const auto& t : d.tags) {
+                        if (t.first != kGroupTagKey) continue;
+                        if (isTagIdentifier(t.second)) {
+                            d.groupName = t.second;   // same model -> one group
+                        } else {
+                            EA_LOG_WARN << "device " << d.deviceId << ": " << kGroupTagKey
+                                        << " '" << t.second << "' is not a valid group name "
+                                        << "(letters/digits/_/. only) — tag kept, group skipped";
+                        }
+                    }
+                    std::string shown;
+                    for (const auto& t : d.tags) {
+                        if (!shown.empty()) shown += ", ";
+                        shown += t.first + "='" + t.second + "'";
+                    }
+                    EA_LOG_INFO << "device " << d.deviceId << ": group '" << d.groupName
+                                << "', tags " << shown << " (table metadata)";
+                }
+            }
+        }
 
         if (d.connProto == 0) {
             EA_LOG_WARN << "device_table: device " << d.deviceId

@@ -51,8 +51,7 @@ devices send, parses it, and writes it into the
   base library (`src/base`) — the same code the EtherDB server runs, buildable on
   Windows and Linux.
 - **Queues**: moodycamel `BlockingConcurrentQueue`
-  (`src/base/blockingconcurrentqueue.h`) with the same traits as the EtherDB server
-  (larger blocks + block recycling).
+  (`src/base/blockingconcurrentqueue.h`) 
 - **Parsing**: **one thread** performs all protocol parsing (fully configuration
   driven, no hard-coded protocol): custom_data frames and modbus responses both
   enter the parser thread from the unified listening port.
@@ -133,6 +132,21 @@ read-only); the three tables match the plant exports:
   different EtherDB tables. `local_server_port` is the adapter's listening port
   (custom_data/modbus share the unified data port, http uses its own port — the
   two kinds must not collide); `data_proto_id` joins the other two tables.
+  Each row may also carry an optional `tag`: **it only affects table creation**.
+  The cell holds one or more `key=value` pairs separated by `;` or `,`, e.g.
+  `area=A1;model=T100`; they are written as **table metadata** (never columns):
+  ```sql
+  CREATE GROUP IF NOT EXISTS T100;                 -- group = the model value
+  CREATE TABLE IF NOT EXISTS dev_T100_001 (ts TIMESTAMP, item1 SMALLINT, ...)
+         IN T100 TAGS (area='A1', model='T100');
+  ```
+  **Tables with the same model join one group** (visible via `SHOW GROUPS` /
+  `SHOW TABLES`) even though their tags differ. **The table count and the table
+  columns do not change**. **`model` is mandatory: without it (or with an empty
+  value) the device counts as unlabelled and the CREATE TABLE is exactly the
+  original one.** Tag **keys** and the group name must be identifiers
+  (letters/digits/`_`/`.`), **values** are free text (quoted for you); a
+  malformed item is skipped with a warning.
 - `data_header_table`: the frame format + frame type for each `data_proto_id`.
   - **custom_data** (6-byte custom header, little endian):
     `[frameType 1B][flag 1B][frameLen 2B][sequenceId 2B][payload ...][flag 1B?]`
@@ -237,7 +251,9 @@ flush the write queue → persist).
 Table layout: `<device_id>(ts TIMESTAMP, <field1> <type>, ...)` where `ts` is the
 adapter's **receive time** (milliseconds). Status and event data share the same
 field layout but live in separate tables (e.g. `dev_T100_001` /
-`dev_T100_001_E`). Runtime statistics are logged every 5 seconds
+`dev_T100_001_E`). When `device_table.tag` is set, the group and tag are written
+into the **table metadata** (not a column) at creation time — see
+`SHOW GROUPS`. Runtime statistics are logged every 5 seconds
 (`log\etherAdapter*.log`, including event/modbus/http counters).
 
 ## 6. End-to-end testing

@@ -132,6 +132,21 @@ bool EtherDBWriter::ensureDatabase(std::string* err) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// SQL string literal helpers (table metadata values, http INSERT values)
+// ---------------------------------------------------------------------------
+namespace {
+std::string quoteSqlString(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') out += "''";
+        else out.push_back(c);
+    }
+    out += "'";
+    return out;
+}
+} // namespace
+
 std::string EtherDBWriter::createTableSql(const DeviceDesc& dev) const {
     std::string sql = "CREATE TABLE IF NOT EXISTS " + dev.deviceId + " (ts TIMESTAMP";
     for (const FieldDesc& f : dev.spec.fields) {
@@ -141,10 +156,35 @@ std::string EtherDBWriter::createTableSql(const DeviceDesc& dev) const {
         sql += f.colType;
     }
     sql += ")";
+
+    // device_table.tag -> table METADATA, never a column (EtherDB tag.txt model:
+    //   [IN <group>] [TAGS (key='value', ...)]).
+    // The group comes from the `model` tag, so tables of the same model share a
+    // group. Nothing configured -> plain CREATE TABLE, exactly as before.
+    if (!dev.groupName.empty()) sql += " IN " + dev.groupName;
+    if (!dev.tags.empty()) {
+        sql += " TAGS (";
+        for (size_t i = 0; i < dev.tags.size(); ++i) {
+            if (i) sql += ", ";
+            sql += dev.tags[i].first;
+            sql += '=';
+            sql += quoteSqlString(dev.tags[i].second);
+        }
+        sql += ")";
+    }
     return sql;
 }
 
 bool EtherDBWriter::ensureTable(const DeviceDesc& dev, std::string* err) {
+    if (!dev.groupName.empty()) {
+        // The group must exist before the table can join it.
+        EtDBResult g = _client->query("CREATE GROUP IF NOT EXISTS " + dev.groupName);
+        if (!g.error().empty()) {
+            if (err) *err = "CREATE GROUP " + dev.groupName + " failed: " + g.error();
+            return false;
+        }
+    }
+
     EtDBResult r = _client->query(createTableSql(dev));
     if (!r.error().empty()) {
         if (err) *err = "CREATE TABLE " + dev.deviceId + " failed: " + r.error();
@@ -390,8 +430,7 @@ void EtherDBWriter::writeBatchSql(const RowBatch& batch) {
                 else if (f.kind == FieldKind::Bool) sql += (c.v.i ? '1' : '0');
                 else                               sql += std::to_string(c.v.i);
             }
-            sql += ')';
-        }
+            sql += ')';        }
 
         EtDBResult r = _client->query(sql);
         if (!r.error().empty()) {

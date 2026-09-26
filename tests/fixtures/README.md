@@ -12,6 +12,14 @@ These CSVs are a self-consistent version of the repository sample data
       - dev_MB_401      modbus(2)       ip 127.0.0.2, request port 10004,
                         port 60382, proto 100081
       - dev_HTTP_001    http(3)         ip 127.0.0.1, HTTP port 60390, proto 100082
+
+    The CSV ends with a `tag` column holding key=value pairs: the two T100 rows
+    carry `area=A1;model=T100`, so their tables are created
+    `IN T100 TAGS (area='A1', model='T100')` — same model, one group (check with
+    `SHOW GROUPS`); `dev_MB_401` carries `area=A1` WITHOUT a model, which is
+    treated as unlabelled (warning, plain `CREATE TABLE`), and `dev_HTTP_001`
+    leaves the cell empty. The tag is table METADATA — never a column, and the
+    number of tables does not change.
   * data_header_table:
       - 100077: custom_data STATUS frame — frame_type 0xC, frame_len 73
         (payload bytes of ONE record), no delimiter.

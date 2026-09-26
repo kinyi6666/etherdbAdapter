@@ -53,7 +53,8 @@ static const char* kSchema =
     "  local_server_port INTEGER,"
     "  data_proto_id     INTEGER NOT NULL,"
     "  device_type       TEXT,"
-    "  endian            INTEGER DEFAULT 0"
+    "  endian            INTEGER DEFAULT 0,"
+    "  tag               TEXT"
     ");"
     "CREATE TABLE IF NOT EXISTS data_header_table ("
     "  data_proto_id INTEGER PRIMARY KEY,"
@@ -227,7 +228,7 @@ static bool importDeviceTable(sqlite3* db, const std::string& csv, ImportStats* 
         std::string sql =
             "INSERT OR REPLACE INTO device_table"
             "(device_id, device_name, device_ip, device_port, conn_proto,"
-            " local_server_port, data_proto_id, device_type, endian) VALUES(" +
+            " local_server_port, data_proto_id, device_type, endian, tag) VALUES(" +
             colValue(toUtf8(did)) + "," +
             colValue(toUtf8(f.size() > 1 ? f[1] : "")) + "," +
             colValue(toUtf8(f.size() > 2 ? f[2] : "")) + "," +
@@ -236,7 +237,8 @@ static bool importDeviceTable(sqlite3* db, const std::string& csv, ImportStats* 
             integerValue(f.size() > 5 ? f[5] : "") + "," +
             integerValue(f.size() > 6 ? f[6] : "") + "," +
             colValue(toUtf8(f.size() > 7 ? f[7] : "")) + "," +
-            integerValue(f.size() > 8 ? f[8] : "") + ")";
+            integerValue(f.size() > 8 ? f[8] : "") + "," +
+            colValue(toUtf8(f.size() > 9 ? f[9] : "")) + ")";
         if (!execSql(db, sql, err)) return false;
         ++st->rows;
     }

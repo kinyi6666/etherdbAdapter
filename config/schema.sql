@@ -25,7 +25,20 @@ CREATE TABLE IF NOT EXISTS device_table (
     local_server_port INTEGER,           -- ingest port served by the adapter
     data_proto_id     INTEGER NOT NULL,  -- protocol id -> data_header/data_proto
     device_type       TEXT,
-    endian            INTEGER DEFAULT 0  -- 0 = little, 1 = big (0 = use header)
+    endian            INTEGER DEFAULT 0, -- 0 = little, 1 = big (0 = use header)
+    tag               TEXT               -- OPTIONAL tag metadata cell: key=value pairs
+                                         -- separated by ';' or ',', e.g.
+                                         --   area=A1;model=T100
+                                         -- Added to the CREATE TABLE metadata only
+                                         -- (TAGS (area='A1', model='T100')); the
+                                         -- `model` value also names the group the
+                                         -- table joins (IN <group>), so tables of the
+                                         -- same model share a group. **model is
+                                         -- mandatory**: without it the device is
+                                         -- treated as unlabelled and the CREATE TABLE
+                                         -- is the original one. Tag keys and the group
+                                         -- must be identifiers; values are free text.
+                                         -- Never a column of the data table.
 );
 
 CREATE TABLE IF NOT EXISTS data_header_table (
