@@ -21,8 +21,8 @@
                        ▼
             ┌───────────────── muduo (net) ─────────────────┐
  modbus 设备 ◄─请求─ ModbusPoller（3s 轮询，长连接）            │
-           │  └─响应─► TcpServer(60382, ...) onMessage → RawChunk │
-           └─────────► TcpServer(60382, ...)   ↑（响应经统一端口进入）
+           │  └─响应─► TcpServer(50588, ...) onMessage → RawChunk │
+           └─────────► TcpServer(50588, ...)   ↑（响应经统一端口进入）
                       └───────────────────────────┬─────────────────┘
                                                   │ ingest queue (moodycamel)
  http 客户端 ──POST JSON──► HttpIngest(独立端口)     │
@@ -48,7 +48,9 @@
 
 - 网络：复用 EtherDB 的 muduo 风格网络库（`src/net`）+ base 库（`src/base`），
   与 EtherDB 服务端同一套代码，Windows/Linux 均可构建。
-- 队列：moodycamel `BlockingConcurrentQueue`（`src/base/blockingconcurrentqueue.h`）
+- 队列：moodycamel `BlockingConcurrentQueue`（`src/base/blockingconcurrentqueue.h`），
+  与 EtherDB 服务端同样的 traits（大块 + 块回收）。
+- 解析：**单线程**完成全部协议解析（完全按配置驱动，无硬编码协议）：
   custom_data 帧与 modbus 响应都从统一监听端口进入解析线程。
 - 写入：custom_data/modbus 设备走 SDK 列绑定预编译语句
   （`EtDBStmt::bindParamBatch + execute`，最快路径）；http 慢速数据直接拼
@@ -152,14 +154,22 @@ etherAdapter/
     `[transId 2][0x0000 2][length=6 2][slave_addr 1][fun_code 1][start_addr 2][addr_num 2]`
     （大端，transId 1..0xFE 循环）。
 - `data_proto_table`：每个 `data_proto_id` 的传感器字段表（一个字段=一列）：
-  `field_type`（类型码，见 `ConfigDB.cpp::mapFieldType`）、`byte_offset`、
-  `bit_offset/bit_len`（位段）。**`factor` 暂不参与计算**：数据库存原始值
-  （至少非 float 类型一律原始值；配置了非 1 的 factor 只记一条告警）。
+  `field_type`（类型码，见 `ConfigDB.cpp::mapFieldType`）、`byte_offset`（payload
+  中的**绝对偏移**，中间允许留空）、`bit_offset/bit_len`（位段，见下）。
+  **`factor` 暂不参与计算**：数据库存原始值（配置了非 1 的 factor 只记一条告警）。
 
-> `field_type` 类型码表与样例数据的对应关系集中在 `src/adapter/ConfigDB.cpp`
-> 的 `mapFieldType()`：`0=BOOL, 1=INT16, 2=INT32, 3=FLOAT32, 4=FLOAT64,
-> 5=INT8, 6=UINT8, 7=UINT16, 8=UINT32, 9=INT64, 10=UINT64`。若现场协议定义
-> 不同，**只需改这一处**。
+> `field_type` 采用 EtherDB 类型码：`0=TIMESTAMP, 1=BOOL, 2=TINYINT, 3=SMALLINT,
+> 4=INT, 5=BIGINT, 6=FLOAT, 7=DOUBLE, 10=UTINYINT, 11=USMALLINT, 12=UINT,
+> 13=UBIGINT, 14=BIT`（除 `8=BINARY / 9=NCHAR` 外其余常用类型均支持，
+> BIT/BOOL 入库为布尔列）。类型码表集中在 `src/adapter/ConfigDB.cpp` 的
+> `mapFieldType()`；若现场协议定义不同，**只需改这一处**。
+
+> **位段语义**：位段（BIT / BOOL 字段，均 1 字节）取
+> `bValue = (字节 >> bit_offset) & mask(bit_len)`——结果是**整数**
+> （1 位 = 0/1；4 位 = 0..15；bit_len=8 = 0..255），**不跨字节**；
+> 列宽随 `bit_len`：`<=1` 位 → BOOL，`<=7` 位 → TINYINT，8 位 → SMALLINT。
+> `bit_len=0` 表示 `bit_offset` 那一位（`bit_offset=0` 即 bit0）。
+> **普通数值类型忽略 `bit_offset/bit_len`**，从 `byte_offset` 起按类型宽度整段读取。
 
 ### 3.3 导入配置库
 
@@ -232,7 +242,7 @@ build\bin\Release\csv2sqlite.exe build\bin\Release\etherAdapter.db tests\fixture
 cd build\bin
 etherdb_dserver.exe -p 7040      :: 另开窗口
 etherAdapter.exe
-device_sim.exe -n 2000 -i 1      :: 模拟 dev_T100_001 连 60382，发 2000 帧
+device_sim.exe -n 2000 -i 1      :: 模拟 dev_T100_001 连 50588，发 2000 帧
 ```
 
 `device_sim` 以**源端口 10002** 连接（匹配 device_table）。状态帧 73B/记录、

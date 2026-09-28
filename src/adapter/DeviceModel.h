@@ -81,9 +81,16 @@ struct FieldDesc {
     std::string unit;
     FieldKind   kind = FieldKind::IntSigned;
     uint8_t     size = 0;       // raw byte width in the frame (1/2/4/8)
-    uint32_t    byteOffset = 0; // offset into the frame payload
-    uint8_t     bitOffset = 0;  // sub-byte extraction (bitLen == 0: whole bytes)
-    uint8_t     bitLen = 0;
+    uint32_t    byteOffset = 0; // ABSOLUTE offset into the frame payload
+                                //   (fields may be non-contiguous; gaps are fine)
+    uint8_t     bitOffset = 0;  // BIT / BOOL fields only (one byte wide):
+                                //   bValue = (byte >> bitOffset) & mask(bitLen)
+                                //   (0..7, LSB = bit 0)
+    uint8_t     bitLen = 0;     // bits of that SAME byte in the value (no
+                                //   cross-byte ranges, bitOffset+bitLen <= 8);
+                                //   0 = the single bit at bitOffset. The value
+                                //   is an integer (13 for bits 4..7 of 0xD0);
+                                //   the column width follows bitLen
     int         precision = 0;  // decimal digits (informational only)
 
     // ── materialization (computed when the config is loaded) ──

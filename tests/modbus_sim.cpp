@@ -28,7 +28,7 @@
 //   modbus_sim [options]
 //     -r <requestPort>   port to listen for requests        (default 10004)
 //     -h <host>          adapter host                       (default 127.0.0.1)
-//     -s <serverPort>    unified ingest port for responses  (default 60382)
+//     -s <serverPort>    unified ingest port for responses  (default 50588)
 //     -n <count>         requests to serve                  (default 3)
 //     -m <mode>          response header 9|7|2|0            (default 9)
 //     -v <baseValue>     first register value               (default 1000)
@@ -82,7 +82,7 @@ static bool sendAll(SockT s, const std::string& data) {
 
 int main(int argc, char* argv[]) {
     int requestPort = 10004;
-    int serverPort  = 60382;
+    int serverPort  = 50588;
     int count       = 3;
     int mode        = 9;
     int baseValue   = 1000;

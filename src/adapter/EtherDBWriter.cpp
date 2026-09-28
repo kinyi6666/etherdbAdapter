@@ -427,7 +427,7 @@ void EtherDBWriter::writeBatchSql(const RowBatch& batch) {
                 if (c.isNull) { sql += "NULL"; continue; }
                 const FieldDesc& f = dev.spec.fields[k];
                 if (f.asDouble)                    sql += formatDouble(c.v.d);
-                else if (f.kind == FieldKind::Bool) sql += (c.v.i ? '1' : '0');
+                else if (f.colType == "BOOL")      sql += (c.v.i ? '1' : '0');
                 else                               sql += std::to_string(c.v.i);
             }
             sql += ')';        }

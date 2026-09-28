@@ -64,13 +64,18 @@ CREATE TABLE IF NOT EXISTS data_proto_table (
     data_proto_id INTEGER NOT NULL,  -- protocol id (joins data_header_table)
     field_name    TEXT NOT NULL,     -- sensor value name -> EtherDB column name
     unit          TEXT,
-    field_type    INTEGER NOT NULL,  -- see ConfigDB.cpp mapFieldType():
-                                     --   0 BOOL, 1 INT16, 2 INT32, 3 FLOAT32,
-                                     --   4 FLOAT64, 5 INT8, 6 UINT8, 7 UINT16,
-                                     --   8 UINT32, 9 INT64, 10 UINT64
-    byte_offset   INTEGER NOT NULL,  -- offset inside one record payload
-    bit_offset    INTEGER DEFAULT 0, -- sub-byte field extraction
-    bit_len       INTEGER DEFAULT 0, -- 0 = whole bytes
+    field_type    INTEGER NOT NULL,  -- EtherDB type codes (ConfigDB.cpp mapFieldType()):
+                                     --   0 TIMESTAMP(8B)  1 BOOL      2 TINYINT  3 SMALLINT
+                                     --   4 INT            5 BIGINT    6 FLOAT    7 DOUBLE
+                                     --   8 BINARY (unsupported)   9 NCHAR (unsupported)
+                                     --   10 UTINYINT     11 USMALLINT  12 UINT  13 UBIGINT
+                                     --   14 BIT (stored as bool)
+    byte_offset   INTEGER NOT NULL,  -- ABSOLUTE offset into the record payload (gaps allowed)
+    bit_offset    INTEGER DEFAULT 0, -- BIT/BOOL fields only: bit position inside the byte
+                                     --   at byte_offset (0..7, LSB = bit 0)
+    bit_len       INTEGER DEFAULT 0, -- bits of that SAME byte taken as an INTEGER value
+                                     --   (bValue = byte>>bit_offset & mask(bit_len);
+                                     --    bit_offset+bit_len<=8; 0 = the single bit)
     precision     INTEGER DEFAULT 0, -- decimal digits (informational)
     factor        REAL    DEFAULT 1  -- INFORMATIONAL ONLY: factors are ignored,
                                      -- the database stores raw values

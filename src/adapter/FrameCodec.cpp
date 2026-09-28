@@ -43,14 +43,20 @@ inline int64_t signExtend(uint64_t v, int bits) {
     return (int64_t)((v ^ m) - m);
 }
 
-// Decode one integer field value (handles bit fields and signedness).
+// Bit extraction for BIT / BOOL fields — always inside ONE byte: bit_offset
+// advances inside the byte located at byte_offset and never crosses into the
+// next byte. LSB numbering: bit 0 = 0x01. `bits` = bitLen, or 1 when
+// bitLen == 0 (exactly the single bit at bitOffset).
+inline uint64_t loadBits8(uint8_t byte0, int bitOffset, int bits) {
+    const uint64_t mask = (bits >= 8) ? 0xFFull : ((1ull << bits) - 1);
+    return ((uint64_t)byte0 >> bitOffset) & mask;
+}
+
+// Decode one integer field value (signedness only). Bit extraction is NOT done
+// here: bit_offset / bit_len belong to BIT / BOOL fields and are handled in
+// decodePayload — ordinary numeric types ignore them and read whole bytes.
 inline int64_t decodeInt(const uint8_t* p, const FieldDesc& f, bool be) {
-    uint64_t v = loadRaw(p, f.size, be);
-    if (f.bitLen > 0) {
-        uint64_t mask = (f.bitLen >= 64) ? ~0ull : ((1ull << f.bitLen) - 1);
-        v = (v >> f.bitOffset) & mask;
-        return (f.kind == FieldKind::IntSigned) ? signExtend(v, f.bitLen) : (int64_t)v;
-    }
+    const uint64_t v = loadRaw(p, f.size, be);
     return (f.kind == FieldKind::IntSigned) ? signExtend(v, (int)f.size * 8) : (int64_t)v;
 }
 
@@ -111,7 +117,14 @@ bool FrameCodec::decodePayload(const FrameSpec& spec, bool be, const char* paylo
             row[i].v.d = loadFloat64(p, be);
             break;
         case FieldKind::Bool:
-            row[i].v.i = (loadRaw(p, 1, be) != 0) ? 1 : 0;
+            // BIT / BOOL field (one byte): bValue = (byte >> bit_offset) &
+            // getBitMask(bit_len) — the value stays an INTEGER (0/1 for a
+            // single bit, up to 2^bit_len-1 for a range; 13 for bits 4..7 of
+            // 0xD0). The column type follows the width (see ConfigDB).
+            // bit_len == 0 means the single bit at bit_offset; bits never
+            // cross into the next byte; no byte order is involved.
+            row[i].v.i = (int64_t)loadBits8(p[0], f.bitOffset,
+                                            f.bitLen > 0 ? (int)f.bitLen : 1);
             break;
         default: {
             const int64_t raw = decodeInt(p, f, be);

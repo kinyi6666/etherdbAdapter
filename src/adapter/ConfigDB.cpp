@@ -119,35 +119,51 @@ int parseConnProto(const std::string& text) {
 // ----------------------------------------------------------------------------
 // Wire type codes for data_proto_table.field_type.
 //
-// NOTE: adjust this table if the real device protocol definition differs —
-// everything else in the adapter is table-driven, so no other code changes.
+// The codes follow the EtherDB column type numbering (ETDB_TYPE_* in etdb.h)
+// so a field_type maps 1:1 onto the storage type:
 //
-//   code  kind                raw size
-//    0    Bool                1
-//    1    IntSigned  (INT16)  2
-//    2    IntSigned  (INT32)  4
-//    3    Float32             4
-//    4    Float64             8
-//    5    IntSigned  (INT8)   1
-//    6    IntUnsigned (UINT8) 1
-//    7    IntUnsigned (UINT16)2
-//    8    IntUnsigned (UINT32)4
-//    9    IntSigned  (INT64)  8
-//   10    IntUnsigned (UINT64)8
+//   code  EtherDB type    kind                raw size
+//    0    TIMESTAMP       IntSigned (int64)   8      (stored numerically in a BIGINT column)
+//    1    BOOL            Bool                1      (bit fields: see bit_offset/bit_len)
+//    2    TINYINT         IntSigned           1
+//    3    SMALLINT        IntSigned           2
+//    4    INT             IntSigned           4
+//    5    BIGINT          IntSigned           8
+//    6    FLOAT           Float32             4
+//    7    DOUBLE          Float64             8
+//    8    BINARY          — not supported —
+//    9    NCHAR           — not supported —
+//   10    UTINYINT        IntUnsigned         1
+//   11    USMALLINT       IntUnsigned         2
+//   12    UINT            IntUnsigned         4
+//   13    UBIGINT         IntUnsigned         8
+//   14    BIT             Bool                1      (bit-range value, see below)
+//
+// Bit semantics belong to BIT / BOOL fields ONLY (both one byte wide):
+//   bValue = (byte_at_byte_offset >> bit_offset) & getBitMask(bit_len)
+// The value is an INTEGER (0/1 for one bit, up to 255 for 8) and the stored
+// column follows the width (BOOL / TINYINT / SMALLINT, see materializeField);
+// bits never cross into the next byte. bit_len == 0 is treated as one bit at
+// bit_offset. Ordinary numeric types IGNORE bit_offset / bit_len and read
+// `size` whole bytes starting at byte_offset.
 // ----------------------------------------------------------------------------
 bool mapFieldType(int code, FieldKind* kind, uint8_t* size) {
     switch (code) {
-    case 0:  *kind = FieldKind::Bool;        *size = 1; return true;
-    case 1:  *kind = FieldKind::IntSigned;   *size = 2; return true;
-    case 2:  *kind = FieldKind::IntSigned;   *size = 4; return true;
-    case 3:  *kind = FieldKind::Float32;     *size = 4; return true;
-    case 4:  *kind = FieldKind::Float64;     *size = 8; return true;
-    case 5:  *kind = FieldKind::IntSigned;   *size = 1; return true;
-    case 6:  *kind = FieldKind::IntUnsigned; *size = 1; return true;
-    case 7:  *kind = FieldKind::IntUnsigned; *size = 2; return true;
-    case 8:  *kind = FieldKind::IntUnsigned; *size = 4; return true;
-    case 9:  *kind = FieldKind::IntSigned;   *size = 8; return true;
-    case 10: *kind = FieldKind::IntUnsigned; *size = 8; return true;
+    case 0:  *kind = FieldKind::IntSigned;   *size = 8; return true;  // TIMESTAMP
+    case 1:  *kind = FieldKind::Bool;        *size = 1; return true;  // BOOL
+    case 2:  *kind = FieldKind::IntSigned;   *size = 1; return true;  // TINYINT
+    case 3:  *kind = FieldKind::IntSigned;   *size = 2; return true;  // SMALLINT
+    case 4:  *kind = FieldKind::IntSigned;   *size = 4; return true;  // INT
+    case 5:  *kind = FieldKind::IntSigned;   *size = 8; return true;  // BIGINT
+    case 6:  *kind = FieldKind::Float32;     *size = 4; return true;  // FLOAT
+    case 7:  *kind = FieldKind::Float64;     *size = 8; return true;  // DOUBLE
+    case 8:                                 return false;             // BINARY (unsupported)
+    case 9:                                 return false;             // NCHAR  (unsupported)
+    case 10: *kind = FieldKind::IntUnsigned; *size = 1; return true;  // UTINYINT
+    case 11: *kind = FieldKind::IntUnsigned; *size = 2; return true;  // USMALLINT
+    case 12: *kind = FieldKind::IntUnsigned; *size = 4; return true;  // UINT
+    case 13: *kind = FieldKind::IntUnsigned; *size = 8; return true;  // UBIGINT
+    case 14: *kind = FieldKind::Bool;        *size = 1; return true;  // BIT -> BOOL
     default: return false;
     }
 }
@@ -167,12 +183,29 @@ void materializeField(FieldDesc& f, int index) {
     f.name = makeIdentifier(f.name, "f" + std::to_string(index));
 
     switch (f.kind) {
-    case FieldKind::Bool:
+    case FieldKind::Bool: {
+        // The stored column must fit
+        // 0 .. 2^bit_len-1, so its width follows bit_len:
+        //   <= 1 bit  -> BOOL     (0/1)
+        //   <= 7 bits -> TINYINT  (0..127)
+        //    8 bits  -> SMALLINT (0..255)
+        const int bits = (f.bitLen > 0) ? f.bitLen : 1;
         f.asDouble = false;
-        f.outSize  = 1;
-        f.bindType = kBindBool;
-        f.colType  = "BOOL";
+        if (bits <= 1) {
+            f.outSize  = 1;
+            f.bindType = kBindBool;
+            f.colType  = "BOOL";
+        } else if (bits <= 7) {
+            f.outSize  = 1;
+            f.bindType = kBindTinyInt;
+            f.colType  = "TINYINT";
+        } else {
+            f.outSize  = 2;
+            f.bindType = kBindSmallInt;
+            f.colType  = "SMALLINT";
+        }
         break;
+    }
 
     case FieldKind::Float32:
         f.asDouble = true;    // raw float value, stored as FLOAT
@@ -445,11 +478,20 @@ bool ConfigDB::loadFields(std::string* err) {
                         << " — factors are ignored, raw values are stored";
         }
 
-        if (f.bitLen > 0 && (int)f.bitOffset + (int)f.bitLen > (int)f.size * 8) {
+        // Bit-range fields (BIT / BOOL, one byte wide) must stay inside that
+        // byte: bit_offset 0..7 (LSB = bit 0) and bit_len 1..8 with
+        // bit_offset + bit_len <= 8. Ordinary numeric types ignore both
+        // columns (they read whole bytes from byte_offset).
+        if (f.kind == FieldKind::Bool &&
+            (f.bitOffset > 7 || f.bitLen > 8 ||
+             (f.bitLen > 0 && (int)f.bitOffset + (int)f.bitLen > 8))) {
             EA_LOG_WARN << "data_proto_table: field '" << f.name << "' (proto " << pid
-                     << "): bit_offset+bit_len exceed the field width; bit extraction disabled";
+                        << "): bit_offset=" << (int)f.bitOffset
+                        << " bit_len=" << (int)f.bitLen
+                        << " is invalid (must stay inside one byte: bit_offset<=7, "
+                        << "bit_offset+bit_len<=8); falling back to the single bit 0";
             f.bitOffset = 0;
-            f.bitLen    = 0;
+            f.bitLen    = 0;   // 0 = one bit at bit_offset
         }
 
         FrameSpec& spec = _specs[pid];   // create a default spec when the header row is missing

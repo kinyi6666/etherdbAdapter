@@ -36,7 +36,7 @@
 // Usage:
 //   device_sim [options]
 //     -h <host>        adapter host          (default 127.0.0.1)
-//     -p <port>        adapter listen port   (default 60382)
+//     -p <port>        adapter listen port   (default 50588)
 //     -b <bindPort>    local source port     (default 10002; 0 = ephemeral)
 //     -t <types>       frame type(s), hex without 0x, comma separated
 //                      (default "C" = status; "C,E" alternates the status and
@@ -102,7 +102,7 @@ int main(int argc, char* argv[]) {
 #endif
 
     std::string host = "127.0.0.1";
-    int port      = 60382;
+    int port      = 50588;
     int bindPort  = 10002;
     int frames    = 1000;
     int intervalMs = 10;

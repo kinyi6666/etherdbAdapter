@@ -5,12 +5,12 @@ These CSVs are a self-consistent version of the repository sample data
 
   * device_table: four rows; **two of them share ONE endpoint**
       - dev_T100_001    custom_data(1)  ip 127.0.0.1, source port 10002,
-                        port 60382, proto 100077   -> status table
+                        port 50588, proto 100077   -> status table
       - dev_T100_001_E  custom_data(1)  same ip / same source port 10002,
                         proto 100078              -> EVENT table, selected by the
                         frame type (0xE) in the custom header
       - dev_MB_401      modbus(2)       ip 127.0.0.2, request port 10004,
-                        port 60382, proto 100081
+                        port 50588, proto 100081
       - dev_HTTP_001    http(3)         ip 127.0.0.1, HTTP port 60390, proto 100082
 
     The CSV ends with a `tag` column holding key=value pairs: the two T100 rows
@@ -32,9 +32,19 @@ These CSVs are a self-consistent version of the repository sample data
       - 100077: item1 (INT16, offset 0)
       - 100078: item1/item2 (INT16, offsets 0/2)  <- different point count than the
         status stream, on the same device endpoint
-      - 100081: reg1/reg2 (UINT16, offsets 0/2)   <- `factor 0.1` is IGNORED:
-        the raw register value is stored in an INT column
+      - 100081: reg1/reg2 (USMALLINT, offsets 0/2) <- `factor 0.1` is IGNORED:
+        the raw register value is stored in an INT column;
+        alarm (BOOL, byte_offset 0, bit_offset 0, bit_len 0) = bit 0 of the
+          first byte of reg1 (always true for -v 2000 since 0x07 bit 0 = 1),
+        mode  (BIT,  byte_offset 0, bit_offset 4, bit_len 4) = bits 4..7 of the
+          same byte stored as an INTEGER (0 for 0x07; -v 53248 gives 0xD000 -> 13;
+          TINYINT column because the range is wider than one bit)
+        <- bit-range semantics (BIT/BOOL, one byte): bValue = (byte >> bit_offset)
+           & mask(bit_len); ordinary numeric types ignore bit_offset/bit_len
       - 100082: temp (FLOAT32), humidity (FLOAT64) (JSON keys = field names)
+  * field_type uses the EtherDB codes: 1 BOOL, 2 TINYINT, 3 SMALLINT, 6 FLOAT,
+    7 DOUBLE, 11 USMALLINT, 14 BIT (see src/adapter/ConfigDB.cpp::mapFieldType;
+    8 BINARY and 9 NCHAR are not supported and would be skipped with a warning)
 
 ## Run the tests
 

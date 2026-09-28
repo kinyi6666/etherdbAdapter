@@ -22,8 +22,8 @@ devices send, parses it, and writes it into the
                       ▼
            ┌───────────────── muduo (net) ─────────────────┐
  modbus device ◄─request─ ModbusPoller (3 s poll, long conn) │
-           │  └─response─► TcpServer(60382, ...) onMessage → RawChunk │
-           └─────────────► TcpServer(60382, ...)  ↑ (responses on the unified port)
+           │  └─response─► TcpServer(50588, ...) onMessage → RawChunk │
+           └─────────────► TcpServer(50588, ...)  ↑ (responses on the unified port)
                       └───────────────────────────┬─────────────────┘
                                                   │ ingest queue (moodycamel)
  http client ──POST JSON──► HttpIngest(own port)   │
@@ -51,7 +51,8 @@ devices send, parses it, and writes it into the
   base library (`src/base`) — the same code the EtherDB server runs, buildable on
   Windows and Linux.
 - **Queues**: moodycamel `BlockingConcurrentQueue`
-  (`src/base/blockingconcurrentqueue.h`) 
+  (`src/base/blockingconcurrentqueue.h`) with the same traits as the EtherDB server
+  (larger blocks + block recycling).
 - **Parsing**: **one thread** performs all protocol parsing (fully configuration
   driven, no hard-coded protocol): custom_data frames and modbus responses both
   enter the parser thread from the unified listening port.
@@ -263,7 +264,7 @@ build\bin\Release\csv2sqlite.exe build\bin\Release\etherAdapter.db tests\fixture
 cd build\bin
 etherdb_dserver.exe -p 7040      :: separate window
 etherAdapter.exe
-device_sim.exe -n 2000 -i 1      :: simulates dev_T100_001 connecting to 60382, 2000 frames
+device_sim.exe -n 2000 -i 1      :: simulates dev_T100_001 connecting to 50588, 2000 frames
 ```
 
 `device_sim` connects from **source port 10002** (matching device_table). Status
