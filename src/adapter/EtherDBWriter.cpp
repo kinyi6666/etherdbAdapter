@@ -112,8 +112,12 @@ bool EtherDBWriter::ensureDatabase(std::string* err) {
     _dbName = makeIdentifier(_cfg.db, "adapter");
 
     if (_cfg.createDatabase) {
+        // PRECISION must match the value inserted into ts: every ingest path
+        // stores milliseconds (Timestamp::microSecondsSinceEpoch() / 1000),
+        // so the database is created with ms precision — not the EtherDB
+        // default of us / the previous hard-coded us.
         EtDBResult r = _client->query("CREATE DATABASE IF NOT EXISTS " + _dbName +
-                                      " KEEP 3650 REPLICA 1 PRECISION us");
+                                      " KEEP 3650 REPLICA 1 PRECISION ms");
         if (!r.error().empty()) {
             if (err) *err = "CREATE DATABASE " + _dbName + " failed: " + r.error();
             return false;

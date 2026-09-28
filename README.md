@@ -49,8 +49,6 @@
 - 网络：复用 EtherDB 的 muduo 风格网络库（`src/net`）+ base 库（`src/base`），
   与 EtherDB 服务端同一套代码，Windows/Linux 均可构建。
 - 队列：moodycamel `BlockingConcurrentQueue`（`src/base/blockingconcurrentqueue.h`），
-  与 EtherDB 服务端同样的 traits（大块 + 块回收）。
-- 解析：**单线程**完成全部协议解析（完全按配置驱动，无硬编码协议）：
   custom_data 帧与 modbus 响应都从统一监听端口进入解析线程。
 - 写入：custom_data/modbus 设备走 SDK 列绑定预编译语句
   （`EtDBStmt::bindParamBatch + execute`，最快路径）；http 慢速数据直接拼
